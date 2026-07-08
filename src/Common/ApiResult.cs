@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 using System.Text.Json.Serialization;
 
 namespace Opx.Api.Web.Common

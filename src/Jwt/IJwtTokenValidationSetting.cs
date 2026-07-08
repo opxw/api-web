@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 namespace Opx.Api.Web.Jwt
 {
 	public interface IJwtTokenValidationSetting

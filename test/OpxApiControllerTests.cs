@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 using System.Diagnostics;
 using System.Net;
 using System.Text.Json;

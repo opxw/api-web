@@ -1,21 +1,34 @@
+﻿// Copyright (c) 2026 - opx
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Opx.Api.Web.Common;
+using Opx.Api.Web.Docs;
 using Opx.Api.Web.Jwt;
 using Opx.Api.Web.Middlewares;
+using Opx.Api.Web.Options;
 using System.Text;
 
 namespace Opx.Api.Web
 {
 	public static class SetupExtension
 	{
-		public static IServiceCollection UseOpxWebApi(this IServiceCollection services)
+		public static IServiceCollection UseOpxWebApi(this IServiceCollection services, Action<OpxWebApiOptions>? configure = null)
 		{
+			var options = new OpxWebApiOptions();
+			configure?.Invoke(options);
+
 			services.Configure<ApiBehaviorOptions>(o =>
 			{
 				o.SuppressModelStateInvalidFilter = true;
 			});
+
+			services.AddSingleton(options);
+
+			if (options.Docs.Enabled)
+			{
+				services.AddHostedService<OpxApiDocsGeneratorHostedService>();
+			}
 
 			return services;
 		}

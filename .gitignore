@@ -1,3 +1,4 @@
+﻿# Copyright (c) 2026 - opx
 # User-specific files
 *.rsuser
 *.suo
@@ -189,6 +190,7 @@ PublishScripts/
 
 # NuGet Packages
 *.nupkg
+[Pp]ackage/
 # NuGet Symbol Packages
 *.snupkg
 # The packages folder can be ignored because of Package Restore

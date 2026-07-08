@@ -1,5 +1,5 @@
+<!-- Copyright (c) 2026 - opx -->
 <Project Sdk="Microsoft.NET.Sdk.Web">
-
   <PropertyGroup>
     <TargetFrameworks>net10.0</TargetFrameworks>
     <Nullable>enable</Nullable>
@@ -11,30 +11,27 @@
     <Title>Opx Api Web</Title>
     <Authors>Noviyanto Wibowo</Authors>
     <Company>opx</Company>
-    <Copyright>Copyright © 2025 opx</Copyright>
-	  <IsPackable>true</IsPackable>
-	  <Version>1.0.7</Version>
+    <Copyright>Copyright ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â© 2025 opx</Copyright>
+    <IsPackable>true</IsPackable>
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1</AssemblyVersion>
+    <FileVersion>1.0.1.20260708</FileVersion>
+    <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
+    <NoWarn>$(NoWarn);7035</NoWarn>
   </PropertyGroup>
-
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
-
-	<ItemGroup Condition="'$(TargetFramework)' == 'net9.0'">
-		<PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.11" />
-	</ItemGroup>
-
-	<ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
-		<PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
-	</ItemGroup>
-	
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0'">
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.11" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="8.19.1" />
+    <PackageReference Include="Opx.Api.Infrastructure" Version="1.0.0" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.19.1" />
   </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\..\api-infrastructure\src\Opx.Api.Infrastructure.csproj" />
-  </ItemGroup>
-
 </Project>

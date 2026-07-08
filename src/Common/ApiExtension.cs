@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 using System.Net;
 
 namespace Opx.Api.Web.Common

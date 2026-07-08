@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;

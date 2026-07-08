@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 using Microsoft.AspNetCore.Mvc.Filters;
 using System.Globalization;
 using System.Text.Json;

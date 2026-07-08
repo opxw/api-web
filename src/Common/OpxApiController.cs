@@ -1,3 +1,4 @@
+﻿// Copyright (c) 2026 - opx
 using Microsoft.AspNetCore.Mvc;
 using Opx.Api.Infrastructure.Service;
 using System.Net;
