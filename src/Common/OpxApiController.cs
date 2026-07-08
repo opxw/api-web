@@ -17,6 +17,11 @@ namespace Opx.Api.Web.Common
 			await ApiResponseObjectValue.ShowResponseAsync(HttpContext, data);
 		}
 
+		protected async Task OkContentAsync(byte[] rawData, string contentType, string? fileName = null, string type = "file")
+		{
+			await OkAsync(ApiContentData.FromBytes(rawData, contentType, fileName, type));
+		}
+
 		protected async Task OkAsync(Task<AppResult> resultTask)
 		{
 			await OkOrFailAsync(await resultTask);
