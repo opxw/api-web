@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Opx.Api.Web.Common;
 using Opx.Api.Web.Jwt;
+using Opx.Api.Web.Middlewares;
 using System.Text;
 
 namespace Opx.Api.Web
@@ -36,6 +37,11 @@ namespace Opx.Api.Web
 			{
 				await webApplication.HandleUncatchedStatusCodeAsync(context.HttpContext, "StatusCodePages");
 			});
+		}
+
+		public static IApplicationBuilder UseOpxEndpointLog(this IApplicationBuilder app)
+		{
+			return app.UseMiddleware<OpxEndpointLogMiddleware>();
 		}
 
 		public static IServiceCollection UseOpxJwtBearerTokenAuth(this IServiceCollection services, JwtTokenValidationSetting validationSetting)
