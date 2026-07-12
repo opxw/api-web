@@ -11,7 +11,7 @@ using Opx.Api.Web.Options;
 
 namespace Opx.Api.Web.Docs;
 
-internal static class OpxApiDocsGenerator
+public static class OpxApiDocsGenerator
 {
 	private static readonly JsonSerializerOptions JsonOptions = new()
 	{

@@ -1,13 +1,13 @@
 // Copyright (c) 2026 - opx
 namespace Opx.Api.Web.Docs;
 
-internal sealed class OpxApiDocument
+public sealed class OpxApiDocument
 {
 	public DateTimeOffset GeneratedAt { get; set; }
 	public List<OpxApiEndpoint> Endpoints { get; set; } = [];
 }
 
-internal sealed class OpxApiEndpoint
+public sealed class OpxApiEndpoint
 {
 	public string Controller { get; set; } = "";
 	public string Action { get; set; } = "";
@@ -17,7 +17,7 @@ internal sealed class OpxApiEndpoint
 	public List<OpxApiOutput> Output { get; set; } = [];
 }
 
-internal sealed class OpxApiParameter
+public sealed class OpxApiParameter
 {
 	public string Name { get; set; } = "";
 	public string Source { get; set; } = "";
@@ -26,6 +26,6 @@ internal sealed class OpxApiParameter
 	public List<OpxApiParameterProperty> Properties { get; set; } = [];
 }
 
-internal sealed record OpxApiParameterProperty(string Name, string Type);
+public sealed record OpxApiParameterProperty(string Name, string Type);
 
-internal sealed record OpxApiOutput(int StatusCode, string Type);
+public sealed record OpxApiOutput(int StatusCode, string Type);

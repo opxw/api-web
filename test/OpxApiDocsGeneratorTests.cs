@@ -64,6 +64,50 @@ public class OpxApiDocsGeneratorTests
 		}
 	}
 
+	[Test]
+	public void GenerateOpxApiDocs_WhenCalledManually_ReturnsParametersAndOutput()
+	{
+		var outputDirectory = Path.Combine("opx-api-docs-tests", Guid.NewGuid().ToString("N"));
+		var projectRootPath = FindProjectRootPath(AppContext.BaseDirectory)
+			?? throw new DirectoryNotFoundException("Test project root not found.");
+		var expectedOutputDirectory = Path.Combine(projectRootPath, outputDirectory);
+		var builder = WebApplication.CreateBuilder();
+		builder.Services
+			.AddControllers()
+			.AddApplicationPart(typeof(DocsTestController).Assembly);
+
+		using var app = builder.Build();
+		app.MapControllers();
+
+		try
+		{
+			var document = app.GenerateOpxApiDocs(options =>
+			{
+				options.OutputDirectory = outputDirectory;
+				options.FileName = "manual-docs";
+				options.GenerateJson = true;
+				options.GenerateMarkdown = true;
+			});
+			var endpoint = document.Endpoints.Single(value => value.Controller == "DocsTest");
+
+			Assert.Multiple(() =>
+			{
+				Assert.That(File.Exists(Path.Combine(expectedOutputDirectory, "manual-docs.json")), Is.True);
+				Assert.That(File.Exists(Path.Combine(expectedOutputDirectory, "manual-docs.md")), Is.True);
+				Assert.That(endpoint.Parameters.Any(parameter => parameter.Name == "id" && parameter.Source == "Path"), Is.True);
+				Assert.That(endpoint.Parameters.Any(parameter => parameter.Name == "filter" && parameter.Source == "Query"), Is.True);
+				Assert.That(endpoint.Output[0].Type, Is.EqualTo(nameof(DocsTestOutput)));
+			});
+		}
+		finally
+		{
+			if (Directory.Exists(expectedOutputDirectory))
+			{
+				Directory.Delete(expectedOutputDirectory, true);
+			}
+		}
+	}
+
 	private static string? FindProjectRootPath(string startPath)
 	{
 		var directory = new DirectoryInfo(startPath);

@@ -9,8 +9,9 @@ namespace Opx.Api.Web.Common
 		{
 			var statusCode = context.Response.StatusCode;
 
-			if (statusCode == (int)HttpStatusCode.OK || statusCode == (int)HttpStatusCode.RedirectKeepVerb ||
-				statusCode == (int)HttpStatusCode.Redirect)
+			// Successful and redirect/cache responses (including 204 and 304) must retain
+			// their original status and body semantics. Only wrap actual HTTP errors.
+			if (statusCode < (int)HttpStatusCode.BadRequest)
 				return;
 
 			var controller = context.Request.RouteValues["controller"];

@@ -1,48 +1,294 @@
-﻿<!-- Copyright (c) 2026 - opx -->
+<!-- Copyright (c) 2026 - opx -->
 # Opx.Api.Web
 
 Shared ASP.NET Core web helpers for OPX APIs.
 
-## Endpoint Log
+`Opx.Api.Web` provides:
 
-`Opx.Api.Web` provides `UseOpxEndpointLog()` middleware to record executed endpoints.
+- OPX response wrapper: `result`, `data`, `statusCode`
+- `OpxApiController` helper methods: `OkAsync`, `OkOrFailAsync`, `FailAsync`, `OkContentAsync`
+- automatic `AppResult` success/error mapping from service to endpoint response
+- uncaught status-code response wrapper for 400, 401, 403, 404, 405, 415, 500, and other status codes
+- endpoint execution logging with curl, request body, response body, masking, and file output
+- generated endpoint docs in JSON and Markdown
+- wrapped binary/file content through `ApiContentData`
+- JWT bearer setup helper
+- optional API protection middleware for security headers, rate limiting, suspicious traffic, authorization guard, and access log
 
-The log can include:
-
-- method, path, and query string
-- route/controller/action
-- route values
-- authenticated user
-- status code
-- elapsed time
-- request body
-- response/output body
-- executable `curl` format
-- daily file output
-
-## Setup
+## Install
 
 Add the package:
 
 ```xml
-<PackageReference Include="Opx.Api.Web" Version="1.0.1" />
+<PackageReference Include="Opx.Api.Web" Version="1.0.5" />
 ```
 
-Register the middleware after `UseRouting()` and before `UseAuthentication()`:
+If the application uses `AppService` and `AppResult`, also reference:
+
+```xml
+<PackageReference Include="Opx.Api.Infrastructure" Version="1.0.3" />
+```
+
+## Program Setup
+
+Register controllers and OPX web API behavior:
+
+```csharp
+builder.Services.AddControllers();
+builder.Services.UseOpxWebApi();
+```
+
+Register all OPX API web services with configuration:
+
+```csharp
+builder.Services.AddOpxApiWeb(builder.Configuration);
+```
+
+Enable generated endpoint docs:
+
+```csharp
+builder.Services.UseOpxWebApi(options => options.GenerateDocs());
+```
+
+Recommended middleware order:
 
 ```csharp
 app.UseHttpsRedirection();
 app.UseRouting();
+app.UseOpxApiProtection();
 app.UseOpxEndpointLog();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseOpxWebApiHandler();
+app.UseOpxWebApiStatusCodePages();
+app.MapControllers();
 ```
 
-If the API does not explicitly call `UseRouting()`, add it as shown above so endpoint metadata can be resolved.
+If the API does not explicitly call `UseRouting()`, add it so endpoint metadata can be resolved by the endpoint logger.
+
+## API Protection
+
+`UseOpxApiProtection()` enables the protection middlewares in this order:
+
+```csharp
+app.UseOpxSecurityHeaders();
+app.UseOpxRateLimiting();
+app.UseOpxSuspiciousTrafficGuard();
+app.UseOpxAuthorizationGuard();
+app.UseOpxAccessLog();
+```
+
+Shortcut:
+
+```csharp
+app.UseOpxApiProtection();
+```
+
+Default behavior:
+
+- security headers are enabled by default
+- rate limiting is disabled until `OpxApiProtection:RateLimiting:Enabled` is `true`
+- suspicious traffic guard is disabled until `OpxApiProtection:SuspiciousTraffic:Enabled` is `true`
+- authorization guard is disabled until `OpxApiProtection:AuthorizationGuard:Enabled` is `true`
+- access log is disabled until `OpxApiProtection:AccessLog:Enabled` is `true`
+
+Configuration:
+
+```json
+{
+  "OpxApiProtection": {
+    "SecurityHeaders": {
+      "Enabled": true,
+      "ReferrerPolicy": "no-referrer",
+      "FrameOptions": "DENY"
+    },
+    "RateLimiting": {
+      "Enabled": true,
+      "Limit": 60,
+      "WindowSeconds": 60,
+      "PathPrefixes": [
+        "/api",
+        "/artists"
+      ]
+    },
+    "SuspiciousTraffic": {
+      "Enabled": true,
+      "Block": true,
+      "StatusCode": 400,
+      "Patterns": [
+        "sqlmap",
+        ".env",
+        ".git",
+        "union select",
+        "information_schema",
+        "<script",
+        "../",
+        "xp_cmdshell",
+        "or 1=1",
+        "drop table"
+      ]
+    },
+    "AuthorizationGuard": {
+      "Enabled": false,
+      "ExcludedPathPrefixes": [
+        "/health",
+        "/swagger",
+        "/openapi"
+      ]
+    },
+    "AccessLog": {
+      "Enabled": true,
+      "Output": "Logger",
+      "FilePath": "logs/access-log-{date}.log"
+    },
+    "SecurityIssueLog": {
+      "Enabled": true,
+      "Output": "File",
+      "FilePath": "logs/security-issue-log-{date}.log"
+    },
+    "LogApi": {
+      "Enabled": false
+    }
+  }
+}
+```
+
+Security headers:
+
+- `X-Content-Type-Options: nosniff`
+- `Referrer-Policy`
+- `X-Frame-Options`
+- removes `Server`
+- removes `X-Powered-By`
+
+Rate limiting:
+
+- limits by client IP and path prefix
+- writes `RateLimit-*` and `X-RateLimit-*` headers
+- returns OPX error response with body `statusCode: "429"` when exceeded
+
+Suspicious traffic guard:
+
+- detects common scanner and attack tokens such as `sqlmap`, `.env`, `.git`, SQL tokens, and script tokens
+- stores the matched reason in `HttpContext.Items["OpxSuspiciousReason"]`
+- can log only or block request based on `Block`
+
+Authorization guard:
+
+- validates Bearer JWT using ASP.NET Core authentication
+- does not only check whether an `Authorization` header exists
+- can exclude public path prefixes
+- `[AllowAnonymous]` endpoints are skipped
+
+Use `[Authorize]` on controllers/actions for the main authorization contract. `AuthorizationGuard` is intended as a quick global protection layer.
+
+Access log:
+
+- request path
+- status
+- elapsed time
+- IP
+- host
+- user-agent
+- suspicious reason
+
+Security issue log:
+
+- written when suspicious traffic is detected
+- default file path is `logs/security-issue-log-{date}.log`
+- can write to `Logger`, `File`, or `Both`
+
+Log API:
+
+- disabled by default through `OpxApiProtection:LogApi:Enabled`
+- reads access log and security issue log files
+- returns OPX response wrapper
+- use authentication/authorization or a private network when enabling it
+
+```http
+GET /opx/logs/access?date=20260712&take=100
+GET /opx/logs/security-issues?date=20260712&take=100
+```
+
+Example output:
+
+```json
+{
+  "result": true,
+  "data": {
+    "FilePath": "logs/access-log-20260712.log",
+    "Date": "20260712",
+    "Lines": [
+      "2026-07-12 17:57:58.123 Access GET /artists => 200 in 12 ms | IP=127.0.0.1 | Host=localhost:5141 | UserAgent=curl | Suspicious=-"
+    ]
+  },
+  "statusCode": "200"
+}
+```
+
+Protection stress test result:
+
+```text
+OkOrFailAsync 500 concurrent: Passed, 186 ms
+RateLimiting 500 concurrent: Passed, 51 ms
+SuspiciousTrafficGuard 500 concurrent: Passed, 79 ms
+```
+
+These numbers are local smoke-test results, not a guaranteed benchmark for every machine or deployment.
+
+## Response Contract
+
+Successful response:
+
+```json
+{
+  "result": true,
+  "data": {
+    "Id": 1,
+    "Name": "DeadSquad"
+  },
+  "statusCode": "200"
+}
+```
+
+Array response:
+
+```json
+{
+  "result": true,
+  "data": [
+    {
+      "Id": 1,
+      "Name": "DeadSquad"
+    },
+    {
+      "Id": 2,
+      "Name": "Burgerkill"
+    }
+  ],
+  "statusCode": "200"
+}
+```
+
+Error response:
+
+```json
+{
+  "result": false,
+  "data": {
+    "message": "Not found",
+    "id": "Get",
+    "objectName": "Artists"
+  },
+  "statusCode": "404"
+}
+```
+
+HTTP response status is kept as `200` for application-level responses. The original logical status is written to body field `statusCode`.
 
 ## Controller Usage
 
-Inherit from `OpxApiController` to use the OPX response wrapper helpers:
+Inherit from `OpxApiController` to use the OPX response helpers:
 
 ```csharp
 [ApiController]
@@ -70,20 +316,70 @@ public class ArtistsController : OpxApiController
 }
 ```
 
-When the service returns `AppResult` with `Result = true`, the endpoint writes:
+`OkAsync(Task<AppResult>)` automatically calls success or fail behavior:
 
-```json
+- `AppResult.Result = true` writes `result: true` and `data`
+- `AppResult.Result = false` writes `result: false`, error data, and body `statusCode`
+- `AppResult.ValidationErrorSource` maps to body `statusCode: "400"`
+- `AppResult.ExceptionErrorSource` maps to body `statusCode: "500"`
+
+## Service Usage
+
+Use `AppService.ExecuteAsync` to wrap service code into `AppResult`.
+
+```csharp
+public sealed class ArtistService : AppService
 {
-  "result": true,
-  "data": {
-    "Id": 1,
-    "Name": "DeadSquad"
-  },
-  "statusCode": "200"
+    private readonly DbContext _dbContext;
+
+    public ArtistService(DbContext dbContext)
+    {
+        _dbContext = dbContext;
+    }
+
+    public Task<AppResult> GetArtistsAsync(CancellationToken cancellationToken)
+    {
+        return ExecuteAsync(async token =>
+        {
+            token.ThrowIfCancellationRequested();
+
+            var artists = await _dbContext.Artist
+                .OrderBy(artist => artist.Name)
+                .ToListAsync(token);
+
+            return Success(artists);
+        }, cancellationToken);
+    }
 }
 ```
 
-When the service returns `AppResult` with `Result = false`, the endpoint automatically writes the fail response:
+Validation error:
+
+```csharp
+return ValidationError("Artist is required");
+```
+
+Exception error:
+
+```csharp
+return ExceptionError(exception);
+```
+
+Custom success data:
+
+```csharp
+return Success(new { Id = 1, Name = "DeadSquad" });
+```
+
+## Cancellation Token
+
+When the token is cancelled before main code runs, `ExecuteAsync` returns:
+
+```csharp
+ValidationError("Request cancelled")
+```
+
+Endpoint output:
 
 ```json
 {
@@ -97,20 +393,54 @@ When the service returns `AppResult` with `Result = false`, the endpoint automat
 }
 ```
 
-File response:
+Recommended pattern:
 
 ```csharp
-[HttpGet("{id:int}/photo")]
-public async Task GetPhoto(int id, CancellationToken cancellationToken)
+return await ExecuteAsync(async token =>
 {
-    var photo = await _artistService.GetPhotoAsync(id, cancellationToken);
-    await OkContentAsync(photo.Bytes, photo.ContentType, photo.FileName);
+    token.ThrowIfCancellationRequested();
+
+    var data = await query.ToListAsync(token);
+    return Success(data);
+}, cancellationToken);
+```
+
+You do not need to call `token.ThrowIfCancellationRequested()` on every line. Check once before main work, pass the token to async calls, and add manual checks around long loops, batch processing, or important side effects.
+
+## Status Code Wrapper
+
+`UseOpxWebApiHandler()` and `UseOpxWebApiStatusCodePages()` convert unhandled status pages into OPX response format.
+
+Example not found response:
+
+```json
+{
+  "result": false,
+  "data": {
+    "message": "Not found",
+    "id": "StatusCodePages",
+    "objectName": "/missing-page"
+  },
+  "statusCode": "404"
 }
 ```
 
+Handled status messages:
+
+| Status | Message |
+| --- | --- |
+| `400` | `Bad request` |
+| `401` | `Unauthorized` |
+| `403` | `Forbidden` |
+| `404` | `Not found` |
+| `405` | `HTTP Method not allowed` |
+| `415` | `Unsupported Media Type` |
+| `500` | `Internal server error` |
+| `503` | `Unavailable` |
+
 ## API Docs
 
-Generate controller endpoint docs when the application starts:
+Generate controller endpoint docs automatically when the application starts:
 
 ```csharp
 builder.Services.AddControllers();
@@ -134,9 +464,79 @@ builder.Services.UseOpxWebApi(options => options.GenerateDocs(
     fileName: "endpoint-docs"));
 ```
 
-## Appsettings
+Generate only JSON:
 
-Example configuration:
+```csharp
+builder.Services.UseOpxWebApi(options => options.GenerateDocs(
+    outputDirectory: "docs",
+    fileName: "opx-api-docs",
+    json: true,
+    markdown: false));
+```
+
+Generate docs manually after controllers are mapped:
+
+```csharp
+var app = builder.Build();
+
+app.MapControllers();
+
+var docs = app.GenerateOpxApiDocs(options =>
+{
+    options.OutputDirectory = "docs";
+    options.FileName = "opx-api-docs";
+    options.GenerateJson = true;
+    options.GenerateMarkdown = true;
+});
+```
+
+The returned `docs` object contains endpoint, parameter, and result metadata:
+
+```csharp
+foreach (var endpoint in docs.Endpoints)
+{
+    Console.WriteLine($"{endpoint.Method} {endpoint.Route}");
+
+    foreach (var parameter in endpoint.Parameters)
+    {
+        Console.WriteLine($"{parameter.Name} {parameter.Source} {parameter.Type}");
+    }
+
+    foreach (var output in endpoint.Output)
+    {
+        Console.WriteLine($"{output.StatusCode} {output.Type}");
+    }
+}
+```
+
+Generated docs include:
+
+- controller
+- action
+- HTTP method
+- route
+- parameter name, source, type, and required flag
+- complex parameter properties
+- output type and status code from `ProducesResponseType`
+
+## Endpoint Log
+
+`UseOpxEndpointLog()` records executed endpoints.
+
+The log can include:
+
+- method, path, and query string
+- route/controller/action
+- route values
+- authenticated user
+- status code
+- elapsed time
+- request body
+- response/output body
+- executable curl format
+- daily file output
+
+Configuration:
 
 ```json
 {
@@ -168,8 +568,6 @@ Example configuration:
 }
 ```
 
-## Output
-
 `Output` controls where endpoint logs are written:
 
 | Value | Description |
@@ -183,8 +581,6 @@ Recommended production value:
 ```json
 "Output": "File"
 ```
-
-## Daily Log File
 
 Use `{date}` in `FilePath` to create one file per day:
 
@@ -201,7 +597,7 @@ logs/endpoint-log-20260709.log
 
 If `FilePath` is relative, it is resolved from the application `ContentRootPath`.
 
-## Response Body Mode
+## Response Body Logging
 
 `ResponseBodyMode` controls how response bodies are recorded.
 
@@ -220,17 +616,7 @@ Recommended value:
 
 With `Auto`, responses such as `application/json` are logged as body text, while binary files such as images, PDFs, or octet-streams are not written directly into the log.
 
-Example binary metadata:
-
-```text
-[binary content skipped: contentType=image/png; bytes=12345; sha256=F4A...]
-```
-
-## Dynamic API Output
-
-API output does not need to have a fixed DTO or schema.
-
-The middleware records responses dynamically based on `Content-Type`:
+Response logging behavior:
 
 | Response Type | Logging Behavior |
 | --- | --- |
@@ -243,7 +629,7 @@ The middleware records responses dynamically based on `Content-Type`:
 | `application/octet-stream` | Skip raw body and write metadata only |
 | file download | Skip raw body and write metadata only |
 
-Example dynamic JSON output:
+Example JSON output:
 
 ```text
 Output={"result":true,"data":{"Id":1,"Name":"DeadSquad"},"statusCode":"200"}
@@ -255,17 +641,59 @@ Example array output:
 Output={"result":true,"data":[{"Id":1,"Name":"DeadSquad"},{"Id":2,"Name":"Burgerkill"}],"statusCode":"200"}
 ```
 
-Example binary output:
+Example binary metadata:
 
 ```text
 Output=[binary content skipped: contentType=application/pdf; bytes=251904; sha256=2B7...]
 ```
 
-Any endpoint can therefore be logged without endpoint-specific mapping.
+## Sensitive Data Masking
 
-## Wrapped File Content
+When `MaskSensitiveValues` is enabled, values for configured sensitive keys are masked:
 
-If an endpoint must return a file, image, or document while still following the OPX response wrapper, use `ApiContentData`.
+```json
+"SensitiveKeys": [
+  "password",
+  "token",
+  "secret",
+  "authorization"
+]
+```
+
+Example:
+
+```text
+Curl=curl -X POST "http://localhost:5141/authentication/authenticate" -H "Content-Type: application/json" --data "{\"UserId\":\"opx\",\"Password\":\"***\"}"
+```
+
+If you need the logged curl command to be directly executable, set:
+
+```json
+"MaskSensitiveValues": false
+```
+
+Use this only for local debugging because tokens and passwords will be written to log files.
+
+## File Content Response
+
+If an endpoint must return a file, image, or document while still following the OPX response wrapper, use `OkContentAsync` or `ApiContentData`.
+
+Controller example:
+
+```csharp
+[HttpGet("{id:int}/photo")]
+public async Task GetPhoto(int id, CancellationToken cancellationToken)
+{
+    var photo = await _artistService.GetPhotoAsync(id, cancellationToken);
+    await OkContentAsync(photo.Bytes, photo.ContentType, photo.FileName);
+}
+```
+
+Service example:
+
+```csharp
+return Success(ApiContentData.FromBytes(bytes, "application/pdf", "report.pdf"));
+```
 
 Response format:
 
@@ -295,53 +723,31 @@ Fields:
 | `encoding` | Payload encoding, currently `base64` |
 | `rawData` | Raw bytes serialized by JSON as base64 |
 
-Controller example:
-
-```csharp
-[HttpGet("{id}/photo")]
-public async Task GetPhoto(string id)
-{
-    var bytes = await File.ReadAllBytesAsync("photo.png");
-    await OkContentAsync(bytes, "image/png", "photo.png");
-}
-```
-
-Service example:
-
-```csharp
-return Success(ApiContentData.FromBytes(bytes, "application/pdf", "report.pdf"));
-```
-
 Clients should decode `data.rawData` from base64 according to `data.contentType`.
 
-## Sensitive Data Masking
+## JWT Bearer Helper
 
-When `MaskSensitiveValues` is enabled, values for configured sensitive keys are masked:
+Register JWT bearer authentication:
 
-```json
-"SensitiveKeys": [
-  "password",
-  "token",
-  "secret",
-  "authorization"
-]
+```csharp
+builder.Services.UseOpxJwtBearerTokenAuth(new JwtTokenValidationSetting
+{
+    SecretKey = "your-secret-key",
+    Issuer = "opx",
+    Audience = "opx-api",
+    ExpirationSeconds = 3600,
+    Algorithm = SecurityAlgorithms.HmacSha256
+});
 ```
 
-Example:
+Then enable authentication middleware:
 
-```text
-Curl=curl -X POST "http://localhost:5141/authentication/authenticate" -H "Content-Type: application/json" --data "{\"UserId\":\"opx\",\"Password\":\"***\"}"
+```csharp
+app.UseAuthentication();
+app.UseAuthorization();
 ```
 
-If you need the logged `curl` command to be directly executable, set:
-
-```json
-"MaskSensitiveValues": false
-```
-
-Use this only for local debugging because tokens and passwords will be written to log files.
-
-## Example Log
+## Example Endpoint Log
 
 ```text
 2026-07-08 12:53:43.611 Endpoint executed GET /artists => 200 in 211 ms | Endpoint=Artists.Get | Route=artists | RouteValues=action=Get, controller=Artists | User=opx | Curl=curl -X GET "http://localhost:5141/artists" -H "Authorization: ***" | Output={"result":true,"data":[{"Id":1,"Name":"DeadSquad"},{"Id":2,"Name":"Burgerkill"}],"statusCode":"200"}
