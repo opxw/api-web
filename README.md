@@ -226,12 +226,34 @@ Example output:
 }
 ```
 
-Protection stress test result:
+## Benchmark Smoke Test
+
+These smoke tests run in the NUnit test project and are intended to catch obvious performance regressions in core response/protection paths.
+
+Command:
+
+```powershell
+dotnet test .\api-web\test\Opx.Api.Web.Tests.csproj --filter "FullyQualifiedName~FiveHundredConcurrentRequests" --no-build --verbosity normal
+```
+
+Test machine:
+
+| Spec | Value |
+| --- | --- |
+| Device | ASUS Vivobook 14 X1404VAP_A1404VA |
+| CPU | Intel(R) Core(TM) 7 150U |
+| Cores / logical processors | 10 / 12 |
+| Max clock | 1800 MHz |
+| RAM | 25.37 GB |
+| OS | Microsoft Windows 11 Home Single Language 64-bit, version 10.0.26200 |
+| .NET SDK | 10.0.301 |
+
+Result:
 
 ```text
-OkOrFailAsync 500 concurrent: Passed, 186 ms
-RateLimiting 500 concurrent: Passed, 51 ms
-SuspiciousTrafficGuard 500 concurrent: Passed, 79 ms
+OkOrFailAsync 500 concurrent: Passed, 126 ms
+RateLimiting 500 concurrent: Passed, 46 ms
+SuspiciousTrafficGuard 500 concurrent: Passed, 249 ms
 ```
 
 These numbers are local smoke-test results, not a guaranteed benchmark for every machine or deployment.
