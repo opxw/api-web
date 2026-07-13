@@ -22,14 +22,8 @@ public sealed class OpxLogsController : OpxApiController
 	[HttpGet("access")]
 	public async Task Access([FromQuery] string? date = null, [FromQuery] int take = 100)
 	{
-		if (!IsEnabled())
+		if (!await EnsureAllowedAsync("AccessLog"))
 		{
-			await FailAsync(new ApiErrorValue
-			{
-				Message = "Log API is disabled",
-				Id = "LogApi",
-				ObjectName = "AccessLog"
-			}, StatusCodes.Status403Forbidden);
 			return;
 		}
 
@@ -39,23 +33,71 @@ public sealed class OpxLogsController : OpxApiController
 	[HttpGet("security-issues")]
 	public async Task SecurityIssues([FromQuery] string? date = null, [FromQuery] int take = 100)
 	{
-		if (!IsEnabled())
+		if (!await EnsureAllowedAsync("SecurityIssueLog"))
 		{
-			await FailAsync(new ApiErrorValue
-			{
-				Message = "Log API is disabled",
-				Id = "LogApi",
-				ObjectName = "SecurityIssueLog"
-			}, StatusCodes.Status403Forbidden);
 			return;
 		}
 
 		await OkAsync(_logFileReader.ReadSecurityIssueLog(date, take));
 	}
 
-	private bool IsEnabled()
+	private async Task<bool> EnsureAllowedAsync(string objectName)
 	{
-		return _configuration.GetValue("OpxApiProtection:LogApi:Enabled", false);
+		if (!_configuration.GetValue("OpxApiProtection:LogApi:Enabled", false))
+		{
+			await FailAsync(new ApiErrorValue
+			{
+				Message = "Log API is disabled",
+				Id = "LogApi",
+				ObjectName = objectName
+			}, StatusCodes.Status403Forbidden);
+			return false;
+		}
+
+		if (_configuration.GetValue("OpxApiProtection:LogApi:RequireAuthorization", false)
+			&& User.Identity?.IsAuthenticated != true)
+		{
+			await FailAsync(new ApiErrorValue
+			{
+				Message = "Unauthorized",
+				Id = "LogApi",
+				ObjectName = objectName
+			}, StatusCodes.Status401Unauthorized);
+			return false;
+		}
+
+		var requiredRole = _configuration.GetValue<string>("OpxApiProtection:LogApi:RequiredRole");
+		if (!string.IsNullOrWhiteSpace(requiredRole)
+			&& !requiredRole
+				.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+				.Any(User.IsInRole))
+		{
+			await FailAsync(new ApiErrorValue
+			{
+				Message = "Forbidden",
+				Id = "LogApi",
+				ObjectName = objectName
+			}, StatusCodes.Status403Forbidden);
+			return false;
+		}
+
+		var requiredPolicy = _configuration.GetValue<string>("OpxApiProtection:LogApi:RequiredPolicy");
+		if (!string.IsNullOrWhiteSpace(requiredPolicy))
+		{
+			var authorizationService = HttpContext.RequestServices.GetService<IAuthorizationService>();
+			if (authorizationService is null
+				|| !(await authorizationService.AuthorizeAsync(User, requiredPolicy)).Succeeded)
+			{
+				await FailAsync(new ApiErrorValue
+				{
+					Message = "Forbidden",
+					Id = "LogApi",
+					ObjectName = objectName
+				}, StatusCodes.Status403Forbidden);
+				return false;
+			}
+		}
+
+		return true;
 	}
 }
-

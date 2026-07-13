@@ -84,6 +84,14 @@ Shortcut:
 app.UseOpxApiProtection();
 ```
 
+Fast core shortcut:
+
+```csharp
+app.UseOpxApiProtectionFast();
+```
+
+`UseOpxApiProtectionFast()` composes security headers, rate limiting, suspicious traffic guard, and authorization guard behind one middleware registration. Keep access/endpoint logging separate when request logging is required.
+
 Default behavior:
 
 - security headers are enabled by default
@@ -104,8 +112,11 @@ Configuration:
     },
     "RateLimiting": {
       "Enabled": true,
+      "Algorithm": "FixedWindow",
       "Limit": 60,
       "WindowSeconds": 60,
+      "CleanupIntervalSeconds": 60,
+      "WriteHeadersOnSuccess": false,
       "PathPrefixes": [
         "/api",
         "/artists"
@@ -115,6 +126,22 @@ Configuration:
       "Enabled": true,
       "Block": true,
       "StatusCode": 400,
+      "BlockedResponseMode": "WrappedFast",
+      "RegexTimeoutMilliseconds": 100,
+      "ExcludedPathPrefixes": [
+        "/health",
+        "/openapi",
+        "/swagger",
+        "/favicon.ico",
+        "/assets",
+        "/static"
+      ],
+      "AllowedIpAddresses": [
+        "127.0.0.1",
+        "10.0.0.0/8",
+        "192.168.1.0/24"
+      ],
+      "DeniedIpAddresses": [],
       "Patterns": [
         "sqlmap",
         ".env",
@@ -134,29 +161,72 @@ Configuration:
         "/health",
         "/swagger",
         "/openapi"
+      ],
+      "WhitelistedPathPrefixes": [
+        "/public",
+        "/callback"
       ]
     },
     "AccessLog": {
       "Enabled": true,
       "Output": "Logger",
-      "FilePath": "logs/access-log-{date}.log"
+      "FilePath": "logs/access-log-{date}.log",
+      "QueueCapacity": 8192,
+      "BatchSize": 100,
+      "FlushIntervalMilliseconds": 250
     },
     "SecurityIssueLog": {
       "Enabled": true,
       "Output": "File",
-      "FilePath": "logs/security-issue-log-{date}.log"
+      "FilePath": "logs/security-issue-log-{date}.log",
+      "Format": "JsonLines",
+      "SampleRate": 10,
+      "MaxPathLength": 512,
+      "MaxQueryLength": 512,
+      "MaxHeaderLength": 512,
+      "MaxReasonLength": 256,
+      "QueueCapacity": 8192,
+      "BatchSize": 100,
+      "FlushIntervalMilliseconds": 250
     },
     "LogApi": {
-      "Enabled": false
+      "Enabled": false,
+      "RequireAuthorization": true,
+      "RequiredRole": "Admin",
+      "RequiredPolicy": "OpxLogViewer"
     },
-    "EndpointProxy": {
-      "Enabled": true,
-      "Mode": "Rewrite",
-      "Routes": {
-        "/_sys/audit/a1": "/opx/logs/access",
-        "/_sys/audit/s1": "/opx/logs/security-issues"
+    "MetricsApi": {
+      "Enabled": false,
+      "RequireAuthorization": true,
+      "RequiredRole": "Admin",
+      "RequiredPolicy": "OpxLogViewer"
+    },
+    "Validation": {
+      "FailFast": false
+    },
+    "Policies": [
+      {
+        "PathPrefix": "/public",
+        "SkipAuthorization": true,
+        "SkipRateLimiting": true,
+        "SkipSuspiciousTraffic": false
+      },
+      {
+        "PathPrefix": "/api/heavy",
+        "RateLimit": 500,
+        "RateLimitWindowSeconds": 60
       }
-    }
+    ]
+  },
+  "OpxEndpointProxy": {
+    "Enabled": true,
+    "Mode": "Rewrite",
+    "RouteMapPath": "App_Data/opx-endpoint-routes.json",
+    "AllowedAliasPrefixes": [
+      "/gw",
+      "/_sys"
+    ],
+    "FailOnConflict": true
   }
 }
 ```
@@ -172,20 +242,37 @@ Security headers:
 Rate limiting:
 
 - limits by client IP and path prefix
+- supports `SlidingWindow` and faster `FixedWindow` algorithms
+- caches rate-limit settings until configuration reload
+- cleans expired in-memory buckets based on `CleanupIntervalSeconds`
+- can skip `RateLimit-*` headers for allowed requests with `WriteHeadersOnSuccess: false`
 - writes `RateLimit-*` and `X-RateLimit-*` headers
 - returns OPX error response with body `statusCode: "429"` when exceeded
 
 Suspicious traffic guard:
 
 - detects common scanner and attack tokens such as `sqlmap`, `.env`, `.git`, SQL tokens, and script tokens
+- supports IP/CIDR allowlist and denylist through `AllowedIpAddresses` and `DeniedIpAddresses`
 - stores the matched reason in `HttpContext.Items["OpxSuspiciousReason"]`
 - can log only or block request based on `Block`
+- caches pattern/regex settings until configuration reload
+- compiles regex patterns and applies a regex timeout
+- skips excluded path prefixes before scanning
+- supports `BlockedResponseMode: "Minimal"` for the lightest blocked responses
+- uses `BlockedResponseMode: "WrappedFast"` by default for cached OPX-style wrapped blocked responses
+- supports `SecurityIssueLog:SampleRate` to reduce high-volume attack log writes
+- writes file security issue logs through a background batch writer when registered by `AddOpxApiWeb`
+- sanitizes CR/LF/TAB in log fields and truncates long path, query, header, and reason values
+- drains queued security issue logs during graceful shutdown
+- supports `QueueCapacity`, `BatchSize`, and `FlushIntervalMilliseconds` for file log batching
 
 Authorization guard:
 
 - validates Bearer JWT using ASP.NET Core authentication
 - does not only check whether an `Authorization` header exists
+- caches enabled/excluded/whitelisted path settings until configuration reload
 - can exclude public path prefixes
+- can whitelist public URL prefixes through `WhitelistedPathPrefixes`
 - `[AllowAnonymous]` endpoints are skipped
 
 Use `[Authorize]` on controllers/actions for the main authorization contract. `AuthorizationGuard` is intended as a quick global protection layer.
@@ -199,17 +286,42 @@ Access log:
 - host
 - user-agent
 - suspicious reason
+- file output is written through an async batch writer when `Output` is `File` or `Both`
 
 Security issue log:
 
 - written when suspicious traffic is detected
 - default file path is `logs/security-issue-log-{date}.log`
 - can write to `Logger`, `File`, or `Both`
+- supports `SampleRate` plus `MaxPathLength`, `MaxQueryLength`, `MaxHeaderLength`, and `MaxReasonLength`
+- supports `QueueCapacity`, `BatchSize`, and `FlushIntervalMilliseconds`
+- tracks dropped entries when the queue is full and writes a warning summary on shutdown
+- supports `Format: "JsonLines"` for structured file log output
 
 Log API:
 
 - disabled by default through `OpxApiProtection:LogApi:Enabled`
 - reads access log and security issue log files
+- can require an authenticated user through `OpxApiProtection:LogApi:RequireAuthorization`
+- can require a role through `OpxApiProtection:LogApi:RequiredRole`
+- can require an authorization policy through `OpxApiProtection:LogApi:RequiredPolicy`
+
+Metrics and health API:
+
+- disabled by default through `OpxApiProtection:MetricsApi:Enabled`
+- exposes protection counters at `GET /opx/protection/metrics`
+- exposes protection health/config state at `GET /opx/protection/health`
+- supports the same `RequireAuthorization`, `RequiredRole`, and `RequiredPolicy` style as Log API
+
+Protection policies:
+
+- configure per-path behavior through `OpxApiProtection:Policies`
+- can skip authorization, skip rate limiting, skip suspicious traffic scan, or override rate-limit settings per path prefix
+
+Configuration validation:
+
+- validates IP/CIDR lists, log format/output, blocked response mode, regex patterns, and policy values during startup
+- set `OpxApiProtection:Validation:FailFast` to `true` to stop startup when config is invalid
 - returns OPX response wrapper
 - use authentication/authorization or a private network when enabling it
 
@@ -220,13 +332,18 @@ GET /opx/logs/security-issues?date=20260712&take=100
 
 Endpoint proxy:
 
-- disabled by default through `OpxApiProtection:EndpointProxy:Enabled`
+- disabled by default through `OpxEndpointProxy:Enabled`
+- route map can be kept outside `appsettings.json` through `RouteMapPath`
+- legacy `OpxApiProtection:EndpointProxy` config is still supported for backward compatibility
 - creates simple local alias routes from `EndpointProxy:Routes`
+- supports route templates such as `{id}` and constrained target routes such as `{id:int}`
 - supports `Redirect` and `Rewrite` mode
+- supports global HTTP methods through `EndpointProxy:Methods`
 - keeps query string when redirecting or rewriting to the target path
 - can require an authenticated user with `RequireAuthorization`
 - can require an API key with `ApiKey` and `ApiKeyHeaderName`
 - accepts only local paths that start with `/`
+- validates duplicate aliases, allowed alias prefixes, and existing endpoint route conflicts when `FailOnConflict` is `true`
 
 ```http
 GET /_sys/audit/a1?take=10
@@ -234,23 +351,63 @@ GET /_sys/audit/a1?take=10
 
 With `Mode: "Rewrite"`, the request is handled by the target endpoint without returning a `Location` header to the client.
 Rewrite target endpoint lookup is cached after the first request for each target path.
+Rewrite target endpoint lookup is cached per HTTP method and target path.
 Rewrite mode enforces authorization metadata on the target endpoint before invoking it.
 API key comparison uses fixed-time hashed comparison.
+
+Route map file:
+
+```json
+{
+  "Routes": [
+    {
+      "Enabled": true,
+      "Alias": "/_sys/audit/a1",
+      "Target": "/opx/logs/access",
+      "Methods": [ "GET" ]
+    },
+    {
+      "Enabled": true,
+      "Alias": "/gw/music/artists/{id}",
+      "Target": "/api/artists/{id}",
+      "Methods": [ "GET" ]
+    }
+  ]
+}
+```
+
+Gateway alias for controller routes:
+
+```json
+{
+  "OpxEndpointProxy": {
+    "Enabled": true,
+    "Mode": "Rewrite",
+    "RouteMapPath": "App_Data/opx-endpoint-routes.json",
+    "AllowedAliasPrefixes": [ "/gw", "/_sys" ],
+    "FailOnConflict": true
+  }
+}
+```
+
+Example requests:
+
+```http
+GET /gw/music/artists
+GET /gw/music/artists/1
+GET /gw/music/artists/with-albums
+```
 
 Enable proxy API key:
 
 ```json
 {
-  "OpxApiProtection": {
-    "EndpointProxy": {
-      "Enabled": true,
-      "Mode": "Rewrite",
-      "ApiKeyHeaderName": "X-Opx-Proxy-Key",
-      "ApiKey": "change-this-secret",
-      "Routes": {
-        "/_sys/audit/a1": "/opx/logs/access"
-      }
-    }
+  "OpxEndpointProxy": {
+    "Enabled": true,
+    "Mode": "Rewrite",
+    "RouteMapPath": "App_Data/opx-endpoint-routes.json",
+    "ApiKeyHeaderName": "X-Opx-Proxy-Key",
+    "ApiKey": "change-this-secret"
   }
 }
 ```
@@ -266,15 +423,11 @@ Enable authenticated user/JWT guard:
 
 ```json
 {
-  "OpxApiProtection": {
-    "EndpointProxy": {
-      "Enabled": true,
-      "Mode": "Rewrite",
-      "RequireAuthorization": true,
-      "Routes": {
-        "/_sys/audit/a1": "/opx/logs/access"
-      }
-    }
+  "OpxEndpointProxy": {
+    "Enabled": true,
+    "Mode": "Rewrite",
+    "RouteMapPath": "App_Data/opx-endpoint-routes.json",
+    "RequireAuthorization": true
   }
 }
 ```
@@ -320,9 +473,17 @@ Test machine:
 Result:
 
 ```text
-OkOrFailAsync 500 concurrent: Passed, 65 ms
-RateLimiting 500 concurrent: Passed, 36 ms
-SuspiciousTrafficGuard 500 concurrent: Passed, 291 ms
+OkOrFailAsync 500 concurrent: Passed, 131 ms
+AuthorizationGuard whitelisted 5000 concurrent: Passed, 91 ms
+EndpointLogWriter 5000 file logs: Passed, 201 ms
+RateLimiting 500 concurrent: Passed, 156 ms
+RateLimiting policy-skipped 5000 concurrent: Passed, 33 ms
+SecurityIssueLogWriter 5000 file logs: Passed, 138 ms
+SuspiciousTrafficGuard clean 500 concurrent: Passed, 58 ms
+SuspiciousTrafficGuard clean 5000 concurrent: Passed, 39 ms
+SuspiciousTrafficGuard default wrapped-fast blocked 500 concurrent: Passed, 599 ms
+SuspiciousTrafficGuard minimal sampled blocked 500 concurrent: Passed, 105 ms
+SuspiciousTrafficGuard wrapped-fast sampled blocked 500 concurrent: Passed, 75 ms
 ```
 
 These numbers are local smoke-test results, not a guaranteed benchmark for every machine or deployment.
@@ -335,11 +496,28 @@ Run focused proxy benchmarks:
 dotnet run -c Release --project .\api-web\benchmark\Opx.Api.Web.Benchmarks\Opx.Api.Web.Benchmarks.csproj
 ```
 
+Run only middleware benchmarks:
+
+```powershell
+dotnet run -c Release --project .\api-web\benchmark\Opx.Api.Web.Benchmarks\Opx.Api.Web.Benchmarks.csproj --filter "*OpxMiddlewareBenchmarks*"
+```
+
 Current benchmarks:
 
 - endpoint proxy redirect
 - endpoint proxy rewrite
 - direct target endpoint
+- authorization guard whitelisted request
+- fixed-window rate limit allowed request
+- suspicious traffic clean request
+
+Latest middleware BenchmarkDotNet result:
+
+```text
+AuthorizationWhitelisted:    Mean 649.6 ns, Allocated 1.13 KB
+RateLimitFixedWindowAllowed: Mean 2.319 us, Allocated 3.41 KB
+SuspiciousClean:             Mean 956.1 ns, Allocated 1.23 KB
+```
 
 ## Response Contract
 
@@ -641,6 +819,8 @@ The log can include:
 - executable curl format
 - daily file output
 
+For better throughput, keep `IncludeRequestBody` and `IncludeResponseBody` disabled unless debugging a specific endpoint. When response body capture is disabled, the middleware does not replace or buffer the response stream.
+
 Configuration:
 
 ```json
@@ -649,10 +829,10 @@ Configuration:
     "Enabled": true,
     "IncludeQueryString": true,
     "IncludeRouteValues": true,
-    "IncludeRequestBody": true,
-    "IncludeResponseBody": true,
+    "IncludeRequestBody": false,
+    "IncludeResponseBody": false,
     "IncludeCurl": true,
-    "Output": "File",
+    "Output": "Logger",
     "FilePath": "logs/endpoint-log-{date}.log",
     "ResponseBodyMode": "Auto",
     "TextResponseContentTypes": [
@@ -681,11 +861,13 @@ Configuration:
 | `Logger` | Write to ASP.NET Core logger |
 | `Both` | Write to both file and logger |
 
-Recommended production value:
+Recommended high-throughput value:
 
 ```json
-"Output": "File"
+"Output": "Logger"
 ```
+
+Use `File` or `Both` only when the file sink is acceptable for the traffic level.
 
 Use `{date}` in `FilePath` to create one file per day:
 

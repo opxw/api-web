@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Controllers;
+using Opx.Api.Web.Logs;
 
 namespace Opx.Api.Web.Middlewares;
 
@@ -13,32 +14,37 @@ public sealed class OpxEndpointLogMiddleware
     private readonly ILogger<OpxEndpointLogMiddleware> _logger;
     private readonly IConfiguration _configuration;
     private readonly IWebHostEnvironment _environment;
+    private readonly OpxEndpointLogWriter? _endpointLogWriter;
 
     public OpxEndpointLogMiddleware(
         RequestDelegate next,
         ILogger<OpxEndpointLogMiddleware> logger,
         IConfiguration configuration,
-        IWebHostEnvironment environment)
+        IWebHostEnvironment environment,
+        OpxEndpointLogWriter? endpointLogWriter = null)
     {
         _next = next;
         _logger = logger;
         _configuration = configuration;
         _environment = environment;
+        _endpointLogWriter = endpointLogWriter;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (!_configuration.GetValue<bool>("EndpointLog:Enabled"))
+        var settings = ReadSettings();
+        if (!settings.Enabled)
         {
             await _next(context);
             return;
         }
 
-        var requestBody = await ReadRequestBodyAsync(context);
+        var requestBody = await ReadRequestBodyAsync(context, settings);
         var originalResponseBody = context.Response.Body;
-        await using var responseBody = new MemoryStream();
-        if (_configuration.GetValue<bool>("EndpointLog:IncludeResponseBody"))
+        MemoryStream? responseBody = null;
+        if (settings.IncludeResponseBody)
         {
+            responseBody = new MemoryStream();
             context.Response.Body = responseBody;
         }
 
@@ -57,8 +63,8 @@ public sealed class OpxEndpointLogMiddleware
         finally
         {
             stopwatch.Stop();
-            var responseText = await ReadResponseBodyAsync(context, responseBody, originalResponseBody);
-            WriteLog(context, stopwatch.ElapsedMilliseconds, requestBody, responseText, exception);
+            var responseText = await ReadResponseBodyAsync(context, responseBody, originalResponseBody, settings);
+            WriteLog(context, stopwatch.ElapsedMilliseconds, requestBody, responseText, exception, settings);
         }
     }
 
@@ -67,7 +73,8 @@ public sealed class OpxEndpointLogMiddleware
         long elapsedMilliseconds,
         string? requestBody,
         string? responseBody,
-        Exception? exception)
+        Exception? exception,
+        EndpointLogSettings settings)
     {
         var endpoint = context.GetEndpoint();
         var action = endpoint?.Metadata.GetMetadata<ControllerActionDescriptor>();
@@ -78,14 +85,14 @@ public sealed class OpxEndpointLogMiddleware
         var user = context.User?.Identity?.IsAuthenticated == true
             ? context.User.Identity.Name ?? context.User.FindFirst("uid")?.Value ?? "-"
             : "-";
-        var path = GetPath(context);
-        var routeValues = GetRouteValues(context);
-        var curl = BuildCurl(context, requestBody);
+        var path = GetPath(context, settings);
+        var routeValues = GetRouteValues(context, settings);
+        var curl = BuildCurl(context, requestBody, settings);
         var message = exception is null
             ? $"Endpoint executed {context.Request.Method} {path} => {context.Response.StatusCode} in {elapsedMilliseconds} ms | Endpoint={endpointName} | Route={route} | RouteValues={routeValues} | User={user} | Curl={curl} | Output={responseBody ?? "-"}"
             : $"Endpoint failed {context.Request.Method} {path} => {context.Response.StatusCode} in {elapsedMilliseconds} ms | Endpoint={endpointName} | Route={route} | RouteValues={routeValues} | User={user} | Curl={curl} | Output={responseBody ?? "-"} | Error={exception.Message}";
 
-        if (UseLoggerOutput())
+        if (UseLoggerOutput(settings))
         {
             if (exception is null)
             {
@@ -97,35 +104,34 @@ public sealed class OpxEndpointLogMiddleware
             }
         }
 
-        WriteFileLog(message);
+        WriteFileLog(message, settings);
     }
 
-    private string GetPath(HttpContext context)
+    private string GetPath(HttpContext context, EndpointLogSettings settings)
     {
-        var includeQueryString = _configuration.GetValue("EndpointLog:IncludeQueryString", true);
-        return includeQueryString
+        return settings.IncludeQueryString
             ? $"{context.Request.Path}{context.Request.QueryString}"
             : context.Request.Path.ToString();
     }
 
-    private string GetRouteValues(HttpContext context)
+    private string GetRouteValues(HttpContext context, EndpointLogSettings settings)
     {
-        if (!_configuration.GetValue("EndpointLog:IncludeRouteValues", true))
+        if (!settings.IncludeRouteValues)
         {
             return "-";
         }
 
         var values = context.Request.RouteValues
             .Where(value => value.Value is not null)
-            .Select(value => $"{value.Key}={MaskIfSensitive(value.Key, value.Value?.ToString() ?? string.Empty)}");
+            .Select(value => $"{value.Key}={MaskIfSensitive(value.Key, value.Value?.ToString() ?? string.Empty, settings)}");
 
         var result = string.Join(", ", values);
         return string.IsNullOrWhiteSpace(result) ? "-" : result;
     }
 
-    private async Task<string?> ReadRequestBodyAsync(HttpContext context)
+    private async Task<string?> ReadRequestBodyAsync(HttpContext context, EndpointLogSettings settings)
     {
-        if (!_configuration.GetValue<bool>("EndpointLog:IncludeRequestBody"))
+        if (!settings.IncludeRequestBody)
         {
             return null;
         }
@@ -145,15 +151,16 @@ public sealed class OpxEndpointLogMiddleware
 
         var body = await reader.ReadToEndAsync();
         context.Request.Body.Position = 0;
-        return LimitText(MaskSensitiveJson(body));
+        return LimitText(MaskSensitiveJson(body, settings), settings);
     }
 
     private async Task<string?> ReadResponseBodyAsync(
         HttpContext context,
-        MemoryStream responseBody,
-        Stream originalResponseBody)
+        MemoryStream? responseBody,
+        Stream originalResponseBody,
+        EndpointLogSettings settings)
     {
-        if (!_configuration.GetValue<bool>("EndpointLog:IncludeResponseBody"))
+        if (!settings.IncludeResponseBody || responseBody is null)
         {
             return null;
         }
@@ -162,12 +169,12 @@ public sealed class OpxEndpointLogMiddleware
         responseBody.Position = 0;
         var bytes = responseBody.ToArray();
         await responseBody.CopyToAsync(originalResponseBody);
-        return FormatResponseBody(context, bytes);
+        return FormatResponseBody(context, bytes, settings);
     }
 
-    private string BuildCurl(HttpContext context, string? requestBody)
+    private string BuildCurl(HttpContext context, string? requestBody, EndpointLogSettings settings)
     {
-        if (!_configuration.GetValue("EndpointLog:IncludeCurl", true))
+        if (!settings.IncludeCurl)
         {
             return "-";
         }
@@ -190,7 +197,7 @@ public sealed class OpxEndpointLogMiddleware
         if (context.Request.Headers.Authorization.Count > 0)
         {
             command.Append(" -H \"Authorization: ");
-            command.Append(MaskIfSensitive("Authorization", context.Request.Headers.Authorization.ToString()));
+            command.Append(MaskIfSensitive("Authorization", context.Request.Headers.Authorization.ToString(), settings));
             command.Append('"');
         }
 
@@ -205,14 +212,14 @@ public sealed class OpxEndpointLogMiddleware
         return command.ToString();
     }
 
-    private string MaskSensitiveJson(string value)
+    private string MaskSensitiveJson(string value, EndpointLogSettings settings)
     {
-        if (!_configuration.GetValue("EndpointLog:MaskSensitiveValues", true))
+        if (!settings.MaskSensitiveValues)
         {
             return value;
         }
 
-        var sensitiveKeys = GetSensitiveKeys();
+        var sensitiveKeys = settings.SensitiveKeys;
         var result = value;
         foreach (var key in sensitiveKeys)
         {
@@ -226,35 +233,26 @@ public sealed class OpxEndpointLogMiddleware
         return result;
     }
 
-    private string MaskIfSensitive(string key, string value)
+    private string MaskIfSensitive(string key, string value, EndpointLogSettings settings)
     {
-        if (!_configuration.GetValue("EndpointLog:MaskSensitiveValues", true))
+        if (!settings.MaskSensitiveValues)
         {
             return value;
         }
 
-        return GetSensitiveKeys().Any(item => key.Contains(item, StringComparison.OrdinalIgnoreCase))
+        return settings.SensitiveKeys.Any(item => key.Contains(item, StringComparison.OrdinalIgnoreCase))
             ? "***"
             : value;
     }
 
-    private string[] GetSensitiveKeys()
+    private static string LimitText(string value, EndpointLogSettings settings)
     {
-        return _configuration
-            .GetSection("EndpointLog:SensitiveKeys")
-            .Get<string[]>()
-            ?? ["password", "token", "secret", "authorization"];
-    }
-
-    private string LimitText(string value)
-    {
-        var maxLength = _configuration.GetValue("EndpointLog:MaxBodyLength", 4000);
-        return value.Length <= maxLength
+        return value.Length <= settings.MaxBodyLength
             ? value
-            : string.Concat(value.AsSpan(0, maxLength), "...[truncated]");
+            : string.Concat(value.AsSpan(0, settings.MaxBodyLength), "...[truncated]");
     }
 
-    private string FormatResponseBody(HttpContext context, byte[] bytes)
+    private string FormatResponseBody(HttpContext context, byte[] bytes, EndpointLogSettings settings)
     {
         if (bytes.Length == 0)
         {
@@ -262,7 +260,7 @@ public sealed class OpxEndpointLogMiddleware
         }
 
         var contentType = context.Response.ContentType ?? string.Empty;
-        var responseBodyMode = _configuration.GetValue("EndpointLog:ResponseBodyMode", "Auto");
+        var responseBodyMode = settings.ResponseBodyMode;
 
         if (responseBodyMode.Equals("None", StringComparison.OrdinalIgnoreCase)
             || responseBodyMode.Equals("Skip", StringComparison.OrdinalIgnoreCase))
@@ -272,38 +270,27 @@ public sealed class OpxEndpointLogMiddleware
 
         if (responseBodyMode.Equals("Base64", StringComparison.OrdinalIgnoreCase))
         {
-            return LimitText(Convert.ToBase64String(bytes));
+            return LimitText(Convert.ToBase64String(bytes), settings);
         }
 
         if (responseBodyMode.Equals("Text", StringComparison.OrdinalIgnoreCase)
-            || IsTextResponse(contentType))
+            || IsTextResponse(contentType, settings))
         {
             var text = Encoding.UTF8.GetString(bytes);
-            return LimitText(MaskSensitiveJson(ApplyJsonDataScope(text, contentType)));
+            return LimitText(MaskSensitiveJson(ApplyJsonDataScope(text, contentType, settings), settings), settings);
         }
 
         return GetBodyMetadata(contentType, bytes);
     }
 
-    private bool IsTextResponse(string contentType)
+    private bool IsTextResponse(string contentType, EndpointLogSettings settings)
     {
-        var contentTypes = _configuration
-            .GetSection("EndpointLog:TextResponseContentTypes")
-            .Get<string[]>()
-            ?? [
-                "application/json",
-                "application/problem+json",
-                "application/xml",
-                "text/"
-            ];
-
-        return contentTypes.Any(item => contentType.StartsWith(item, StringComparison.OrdinalIgnoreCase));
+        return settings.TextResponseContentTypes.Any(item => contentType.StartsWith(item, StringComparison.OrdinalIgnoreCase));
     }
 
-    private string ApplyJsonDataScope(string text, string contentType)
+    private string ApplyJsonDataScope(string text, string contentType, EndpointLogSettings settings)
     {
-        var dataScope = _configuration.GetValue("EndpointLog:JsonDataScope", string.Empty);
-        if (string.IsNullOrWhiteSpace(dataScope)
+        if (string.IsNullOrWhiteSpace(settings.JsonDataScope)
             || !contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
         {
             return text;
@@ -317,7 +304,7 @@ public sealed class OpxEndpointLogMiddleware
                 return text;
             }
 
-            if (!document.RootElement.TryGetProperty(dataScope, out var dataElement))
+            if (!document.RootElement.TryGetProperty(settings.JsonDataScope, out var dataElement))
             {
                 return text;
             }
@@ -336,32 +323,34 @@ public sealed class OpxEndpointLogMiddleware
         return $"[binary content skipped: contentType={contentType}; bytes={bytes.Length}; sha256={hash}]";
     }
 
-    private bool UseLoggerOutput()
+    private static bool UseLoggerOutput(EndpointLogSettings settings)
     {
-        var output = _configuration.GetValue("EndpointLog:Output", "Logger");
-        return output.Equals("Logger", StringComparison.OrdinalIgnoreCase)
-            || output.Equals("Both", StringComparison.OrdinalIgnoreCase);
+        return settings.Output.Equals("Logger", StringComparison.OrdinalIgnoreCase)
+            || settings.Output.Equals("Both", StringComparison.OrdinalIgnoreCase);
     }
 
-    private bool UseFileOutput()
+    private static bool UseFileOutput(EndpointLogSettings settings)
     {
-        var output = _configuration.GetValue("EndpointLog:Output", "Logger");
-        return output.Equals("File", StringComparison.OrdinalIgnoreCase)
-            || output.Equals("Both", StringComparison.OrdinalIgnoreCase);
+        return settings.Output.Equals("File", StringComparison.OrdinalIgnoreCase)
+            || settings.Output.Equals("Both", StringComparison.OrdinalIgnoreCase);
     }
 
-    private void WriteFileLog(string message)
+    private void WriteFileLog(string message, EndpointLogSettings settings)
     {
-        if (!UseFileOutput())
+        if (!UseFileOutput(settings))
         {
             return;
         }
 
-        var configuredPath = _configuration.GetValue("EndpointLog:FilePath", "logs/endpoint-log-{date}.log");
-        var filePath = configuredPath.Replace("{date}", DateTime.Now.ToString("yyyyMMdd"), StringComparison.OrdinalIgnoreCase);
-        if (!Path.IsPathRooted(filePath))
+        var filePath = ResolveFilePath(settings);
+        if (_endpointLogWriter is not null)
         {
-            filePath = Path.Combine(_environment.ContentRootPath, filePath);
+            if (!_endpointLogWriter.TryWrite(EndpointLogEntry.Create(message, filePath)))
+            {
+                _logger.LogWarning("Endpoint log queue is full. Dropped: {Message}", message);
+            }
+
+            return;
         }
 
         var directory = Path.GetDirectoryName(filePath);
@@ -373,6 +362,17 @@ public sealed class OpxEndpointLogMiddleware
         File.AppendAllText(filePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
     }
 
+    private string ResolveFilePath(EndpointLogSettings settings)
+    {
+        var filePath = settings.FilePath.Replace("{date}", DateTime.Now.ToString("yyyyMMdd"), StringComparison.OrdinalIgnoreCase);
+        if (!Path.IsPathRooted(filePath))
+        {
+            filePath = Path.Combine(_environment.ContentRootPath, filePath);
+        }
+
+        return filePath;
+    }
+
     private static string EscapeCurlValue(string value)
     {
         return value
@@ -381,4 +381,45 @@ public sealed class OpxEndpointLogMiddleware
             .Replace("\r", "\\r", StringComparison.Ordinal)
             .Replace("\n", "\\n", StringComparison.Ordinal);
     }
+
+    private EndpointLogSettings ReadSettings()
+    {
+        return new EndpointLogSettings(
+            _configuration.GetValue<bool>("EndpointLog:Enabled"),
+            _configuration.GetValue("EndpointLog:IncludeQueryString", true),
+            _configuration.GetValue("EndpointLog:IncludeRouteValues", true),
+            _configuration.GetValue("EndpointLog:IncludeRequestBody", false),
+            _configuration.GetValue("EndpointLog:IncludeResponseBody", false),
+            _configuration.GetValue("EndpointLog:IncludeCurl", true),
+            _configuration.GetValue("EndpointLog:Output", "Logger") ?? "Logger",
+            _configuration.GetValue("EndpointLog:ResponseBodyMode", "Auto") ?? "Auto",
+            _configuration.GetValue("EndpointLog:MaskSensitiveValues", true),
+            Math.Max(1, _configuration.GetValue("EndpointLog:MaxBodyLength", 4000)),
+            _configuration.GetValue("EndpointLog:JsonDataScope", string.Empty) ?? string.Empty,
+            _configuration.GetValue("EndpointLog:FilePath", "logs/endpoint-log-{date}.log") ?? "logs/endpoint-log-{date}.log",
+            _configuration.GetSection("EndpointLog:SensitiveKeys").Get<string[]>() ?? ["password", "token", "secret", "authorization"],
+            _configuration.GetSection("EndpointLog:TextResponseContentTypes").Get<string[]>() ??
+            [
+                "application/json",
+                "application/problem+json",
+                "application/xml",
+                "text/"
+            ]);
+    }
+
+    private sealed record EndpointLogSettings(
+        bool Enabled,
+        bool IncludeQueryString,
+        bool IncludeRouteValues,
+        bool IncludeRequestBody,
+        bool IncludeResponseBody,
+        bool IncludeCurl,
+        string Output,
+        string ResponseBodyMode,
+        bool MaskSensitiveValues,
+        int MaxBodyLength,
+        string JsonDataScope,
+        string FilePath,
+        string[] SensitiveKeys,
+        string[] TextResponseContentTypes);
 }

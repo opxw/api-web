@@ -10,12 +10,15 @@ using Opx.Api.Web.Jwt;
 using Opx.Api.Web.Logs;
 using Opx.Api.Web.Middlewares;
 using Opx.Api.Web.Options;
+using Opx.Api.Web.Protection;
 using Opx.Web.Framework;
 using Opx.Web.Framework.Options;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Opx.Api.Web
 {
@@ -47,6 +50,13 @@ namespace Opx.Api.Web
 
 			services.AddSingleton(options);
 			services.AddSingleton<OpxLogFileReader>();
+			services.AddSingleton<OpxEndpointLogWriter>();
+			services.AddSingleton<OpxProtectionMetrics>();
+			services.AddSingleton<OpxProtectionPolicyProvider>();
+			services.AddSingleton<OpxSecurityIssueLogWriter>();
+			services.AddHostedService<OpxProtectionConfigurationValidator>();
+			services.AddHostedService(provider => provider.GetRequiredService<OpxEndpointLogWriter>());
+			services.AddHostedService(provider => provider.GetRequiredService<OpxSecurityIssueLogWriter>());
 
 			if (options.Docs.Enabled)
 			{
@@ -119,6 +129,11 @@ namespace Opx.Api.Web
 			return app;
 		}
 
+		public static IApplicationBuilder UseOpxApiProtectionFast(this IApplicationBuilder app)
+		{
+			return app.UseMiddleware<OpxApiProtectionFastMiddleware>();
+		}
+
 		public static OpxApiDocument GenerateOpxApiDocs(this WebApplication app, Action<OpxApiDocsOptions>? configure = null)
 		{
 			var options = new OpxApiDocsOptions
@@ -141,7 +156,8 @@ namespace Opx.Api.Web
 			}
 
 			var configuration = webApplication.Services.GetRequiredService<IConfiguration>();
-			var settings = ReadEndpointProxySettings(configuration);
+			var environment = webApplication.Services.GetService<IWebHostEnvironment>();
+			var settings = ReadEndpointProxySettings(configuration, environment?.ContentRootPath);
 			if (!settings.Enabled)
 			{
 				MappedEndpointProxyApplications.Add(webApplication, new object());
@@ -149,17 +165,40 @@ namespace Opx.Api.Web
 			}
 
 			var rewriteEndpointCache = new ConcurrentDictionary<string, RouteEndpoint?>(StringComparer.OrdinalIgnoreCase);
+			var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 			foreach (var route in settings.Routes)
 			{
-				if (!IsLocalPath(route.Key) || !IsLocalPath(route.Value))
+				if (!route.Enabled || !IsValidProxyRoute(route, settings))
 				{
 					continue;
 				}
 
-				var alias = route.Key;
-				var target = route.Value;
-				var builder = webApplication.MapGet(alias, async (HttpContext context) =>
+				if (!aliases.Add(route.Alias))
 				{
+					if (settings.FailOnConflict)
+					{
+						throw new InvalidOperationException($"Endpoint proxy alias '{route.Alias}' is duplicated.");
+					}
+
+					continue;
+				}
+
+				var alias = route.Alias;
+				var target = route.Target;
+				var methods = route.Methods.Length == 0 ? settings.Methods : route.Methods;
+				if (IsEndpointProxyAliasConflictingWithEndpoint(webApplication, alias, methods))
+				{
+					if (settings.FailOnConflict)
+					{
+						throw new InvalidOperationException($"Endpoint proxy alias '{alias}' conflicts with an existing endpoint route.");
+					}
+
+					continue;
+				}
+
+				var builder = webApplication.MapMethods(alias, methods, async (HttpContext context) =>
+				{
+					context.RequestServices.GetService<OpxProtectionMetrics>()?.IncrementProxyHits();
 					if (!await IsEndpointProxyAuthorizedAsync(context, settings))
 					{
 						await WriteEndpointProxyUnauthorizedAsync(context, alias);
@@ -172,7 +211,7 @@ namespace Opx.Api.Web
 						return;
 					}
 
-					context.Response.Redirect(JoinTargetAndQuery(target, context.Request.QueryString), permanent: false);
+					context.Response.Redirect(JoinTargetAndQuery(ResolveRouteTemplate(target, context.Request.RouteValues), context.Request.QueryString), permanent: false);
 				});
 
 				if (settings.RequireAuthorization)
@@ -284,16 +323,79 @@ namespace Opx.Api.Web
 				: $"{target}{queryString}";
 		}
 
-		private static EndpointProxySettings ReadEndpointProxySettings(IConfiguration configuration)
+		private static EndpointProxySettings ReadEndpointProxySettings(IConfiguration configuration, string? contentRootPath)
 		{
-			var section = configuration.GetSection("OpxApiProtection:EndpointProxy");
+			var section = configuration.GetSection("OpxEndpointProxy");
+			if (!section.Exists())
+			{
+				section = configuration.GetSection("OpxApiProtection:EndpointProxy");
+			}
+
+			var methods = section.GetSection("Methods").Get<string[]>() ?? ["GET"];
 			return new EndpointProxySettings(
 				section.GetValue("Enabled", false),
 				section.GetValue("Mode", "Redirect") ?? "Redirect",
 				section.GetValue("RequireAuthorization", false),
 				section.GetValue<string>("ApiKey"),
 				section.GetValue("ApiKeyHeaderName", "X-Opx-Proxy-Key") ?? "X-Opx-Proxy-Key",
-				section.GetSection("Routes").Get<Dictionary<string, string>>() ?? []);
+				methods,
+				section.GetSection("AllowedAliasPrefixes").Get<string[]>() ?? [],
+				section.GetValue("FailOnConflict", true),
+				ReadEndpointProxyRoutes(section, methods, contentRootPath));
+		}
+
+		private static List<EndpointProxyRoute> ReadEndpointProxyRoutes(IConfigurationSection section, string[] defaultMethods, string? contentRootPath)
+		{
+			var routes = new List<EndpointProxyRoute>();
+			routes.AddRange(ReadEndpointProxyRoutesFromSection(section, defaultMethods));
+
+			var routeMapPath = section.GetValue<string>("RouteMapPath");
+			if (string.IsNullOrWhiteSpace(routeMapPath))
+			{
+				return routes;
+			}
+
+			var filePath = Path.IsPathRooted(routeMapPath)
+				? routeMapPath
+				: Path.Combine(contentRootPath ?? AppContext.BaseDirectory, routeMapPath);
+
+			if (!File.Exists(filePath))
+			{
+				return routes;
+			}
+
+			using var stream = File.OpenRead(filePath);
+			var routeMap = JsonSerializer.Deserialize<EndpointProxyRouteMap>(stream, new JsonSerializerOptions
+			{
+				PropertyNameCaseInsensitive = true
+			});
+
+			if (routeMap?.Routes is null)
+			{
+				return routes;
+			}
+
+			routes.AddRange(routeMap.Routes.Select(route => route with
+			{
+				Methods = route.Methods.Length == 0 ? defaultMethods : route.Methods
+			}));
+
+			return routes;
+		}
+
+		private static IEnumerable<EndpointProxyRoute> ReadEndpointProxyRoutesFromSection(IConfigurationSection section, string[] defaultMethods)
+		{
+			var arrayRoutes = section.GetSection("Routes").Get<EndpointProxyRoute[]>();
+			if (arrayRoutes is { Length: > 0 })
+			{
+				return arrayRoutes.Select(route => route with
+				{
+					Methods = route.Methods.Length == 0 ? defaultMethods : route.Methods
+				});
+			}
+
+			var dictionaryRoutes = section.GetSection("Routes").Get<Dictionary<string, string>>() ?? [];
+			return dictionaryRoutes.Select(route => new EndpointProxyRoute(true, route.Key, route.Value, defaultMethods));
 		}
 
 		private static async Task<bool> IsEndpointProxyAuthorizedAsync(HttpContext context, EndpointProxySettings settings)
@@ -340,11 +442,19 @@ namespace Opx.Api.Web
 				targetQueryString = QueryString.FromUriComponent(target[queryStart..]);
 			}
 
-			var endpoint = endpointCache.GetOrAdd(targetPath, static (path, httpContext) => httpContext.RequestServices
-				.GetServices<EndpointDataSource>()
-				.SelectMany(source => source.Endpoints)
-				.OfType<RouteEndpoint>()
-				.FirstOrDefault(candidate => EndpointPathMatches(candidate.RoutePattern.RawText, path)), context);
+			var cacheKey = $"{context.Request.Method}:{targetPath}";
+			var endpoint = endpointCache.GetOrAdd(cacheKey, static (key, httpContext) =>
+			{
+				var separatorIndex = key.IndexOf(':');
+				var method = key[..separatorIndex];
+				var path = key[(separatorIndex + 1)..];
+				return httpContext.RequestServices
+					.GetServices<EndpointDataSource>()
+					.SelectMany(source => source.Endpoints)
+					.OfType<RouteEndpoint>()
+					.FirstOrDefault(candidate => EndpointPathMatches(candidate.RoutePattern.RawText, path)
+						&& EndpointMethodMatches(candidate, method));
+			}, context);
 
 			if (endpoint?.RequestDelegate is null)
 			{
@@ -360,7 +470,7 @@ namespace Opx.Api.Web
 
 			context.Items["OpxEndpointProxyAlias"] = originalPath.ToString();
 			context.Items["OpxEndpointProxyTarget"] = targetPath;
-			context.Request.Path = targetPath;
+			context.Request.Path = ResolveRouteTemplate(targetPath, context.Request.RouteValues);
 			context.Request.QueryString = MergeQueryStrings(targetQueryString, originalQueryString);
 			context.SetEndpoint(endpoint);
 
@@ -419,7 +529,47 @@ namespace Opx.Api.Web
 				return false;
 			}
 
-			return string.Equals(routePattern.TrimStart('/'), targetPath.TrimStart('/'), StringComparison.OrdinalIgnoreCase);
+			return string.Equals(NormalizeRoutePattern(routePattern).TrimStart('/'), NormalizeRoutePattern(targetPath).TrimStart('/'), StringComparison.OrdinalIgnoreCase);
+		}
+
+		private static bool EndpointMethodMatches(Endpoint endpoint, string method)
+		{
+			var methods = endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods;
+			return methods is null || methods.Count == 0 || methods.Any(value => string.Equals(value, method, StringComparison.OrdinalIgnoreCase));
+		}
+
+		private static bool IsEndpointProxyAliasConflictingWithEndpoint(IEndpointRouteBuilder routeBuilder, string alias, string[] methods)
+		{
+			return routeBuilder.DataSources
+				.SelectMany(source => source.Endpoints)
+				.OfType<RouteEndpoint>()
+				.Any(endpoint => EndpointPathMatches(endpoint.RoutePattern.RawText, alias)
+					&& methods.Any(method => EndpointMethodMatches(endpoint, method)));
+		}
+
+		private static string ResolveRouteTemplate(string template, RouteValueDictionary routeValues)
+		{
+			var resolved = template;
+			foreach (var routeValue in routeValues)
+			{
+				var value = Uri.EscapeDataString(routeValue.Value?.ToString() ?? string.Empty);
+				resolved = Regex.Replace(
+					resolved,
+					$@"\{{(\*\*|\*)?{Regex.Escape(routeValue.Key)}(:[^}}]+)?\}}",
+					value,
+					RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+			}
+
+			return resolved;
+		}
+
+		private static string NormalizeRoutePattern(string routePattern)
+		{
+			return Regex.Replace(
+				routePattern,
+				@"\{(\*\*|\*)?([^}:]+)(:[^}]+)?\}",
+				match => $"{{{match.Groups[1].Value}{match.Groups[2].Value}}}",
+				RegexOptions.CultureInvariant);
 		}
 
 		private static bool FixedTimeEquals(string value, string expected)
@@ -429,12 +579,54 @@ namespace Opx.Api.Web
 			return CryptographicOperations.FixedTimeEquals(valueHash, expectedHash);
 		}
 
+		private static bool IsValidProxyRoute(EndpointProxyRoute route, EndpointProxySettings settings)
+		{
+			if (!IsLocalPath(route.Alias) || !IsLocalPath(route.Target))
+			{
+				if (settings.FailOnConflict)
+				{
+					throw new InvalidOperationException($"Endpoint proxy route alias '{route.Alias}' and target '{route.Target}' must be local paths.");
+				}
+
+				return false;
+			}
+
+			if (settings.AllowedAliasPrefixes.Length > 0
+				&& !settings.AllowedAliasPrefixes.Any(prefix => IsLocalPath(prefix) && route.Alias.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+			{
+				if (settings.FailOnConflict)
+				{
+					throw new InvalidOperationException($"Endpoint proxy alias '{route.Alias}' is outside the allowed prefixes: {string.Join(", ", settings.AllowedAliasPrefixes)}.");
+				}
+
+				return false;
+			}
+
+			return true;
+		}
+
 		private sealed record EndpointProxySettings(
 			bool Enabled,
 			string Mode,
 			bool RequireAuthorization,
 			string? ApiKey,
 			string ApiKeyHeaderName,
-			Dictionary<string, string> Routes);
+			string[] Methods,
+			string[] AllowedAliasPrefixes,
+			bool FailOnConflict,
+			List<EndpointProxyRoute> Routes);
+
+		private sealed record EndpointProxyRoute(
+			bool Enabled,
+			string Alias,
+			string Target,
+			string[] Methods)
+		{
+			public EndpointProxyRoute() : this(true, string.Empty, string.Empty, [])
+			{
+			}
+		}
+
+		private sealed record EndpointProxyRouteMap(List<EndpointProxyRoute> Routes);
 	}
 }
