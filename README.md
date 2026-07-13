@@ -148,6 +148,14 @@ Configuration:
     },
     "LogApi": {
       "Enabled": false
+    },
+    "EndpointProxy": {
+      "Enabled": true,
+      "Mode": "Rewrite",
+      "Routes": {
+        "/_sys/audit/a1": "/opx/logs/access",
+        "/_sys/audit/s1": "/opx/logs/security-issues"
+      }
     }
   }
 }
@@ -210,6 +218,67 @@ GET /opx/logs/access?date=20260712&take=100
 GET /opx/logs/security-issues?date=20260712&take=100
 ```
 
+Endpoint proxy:
+
+- disabled by default through `OpxApiProtection:EndpointProxy:Enabled`
+- creates simple local alias routes from `EndpointProxy:Routes`
+- supports `Redirect` and `Rewrite` mode
+- keeps query string when redirecting or rewriting to the target path
+- can require an authenticated user with `RequireAuthorization`
+- can require an API key with `ApiKey` and `ApiKeyHeaderName`
+- accepts only local paths that start with `/`
+
+```http
+GET /_sys/audit/a1?take=10
+```
+
+With `Mode: "Rewrite"`, the request is handled by the target endpoint without returning a `Location` header to the client.
+Rewrite target endpoint lookup is cached after the first request for each target path.
+Rewrite mode enforces authorization metadata on the target endpoint before invoking it.
+API key comparison uses fixed-time hashed comparison.
+
+Enable proxy API key:
+
+```json
+{
+  "OpxApiProtection": {
+    "EndpointProxy": {
+      "Enabled": true,
+      "Mode": "Rewrite",
+      "ApiKeyHeaderName": "X-Opx-Proxy-Key",
+      "ApiKey": "change-this-secret",
+      "Routes": {
+        "/_sys/audit/a1": "/opx/logs/access"
+      }
+    }
+  }
+}
+```
+
+Request with API key:
+
+```http
+GET /_sys/audit/a1?take=10
+X-Opx-Proxy-Key: change-this-secret
+```
+
+Enable authenticated user/JWT guard:
+
+```json
+{
+  "OpxApiProtection": {
+    "EndpointProxy": {
+      "Enabled": true,
+      "Mode": "Rewrite",
+      "RequireAuthorization": true,
+      "Routes": {
+        "/_sys/audit/a1": "/opx/logs/access"
+      }
+    }
+  }
+}
+```
+
 Example output:
 
 ```json
@@ -251,12 +320,26 @@ Test machine:
 Result:
 
 ```text
-OkOrFailAsync 500 concurrent: Passed, 126 ms
-RateLimiting 500 concurrent: Passed, 46 ms
-SuspiciousTrafficGuard 500 concurrent: Passed, 249 ms
+OkOrFailAsync 500 concurrent: Passed, 65 ms
+RateLimiting 500 concurrent: Passed, 36 ms
+SuspiciousTrafficGuard 500 concurrent: Passed, 291 ms
 ```
 
 These numbers are local smoke-test results, not a guaranteed benchmark for every machine or deployment.
+
+## BenchmarkDotNet
+
+Run focused proxy benchmarks:
+
+```powershell
+dotnet run -c Release --project .\api-web\benchmark\Opx.Api.Web.Benchmarks\Opx.Api.Web.Benchmarks.csproj
+```
+
+Current benchmarks:
+
+- endpoint proxy redirect
+- endpoint proxy rewrite
+- direct target endpoint
 
 ## Response Contract
 
