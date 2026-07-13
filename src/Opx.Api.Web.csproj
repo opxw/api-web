@@ -13,9 +13,9 @@
     <Company>opx</Company>
     <Copyright>Copyright (c) 2026 - opx</Copyright>
     <IsPackable>true</IsPackable>
-    <Version>1.0.6</Version>
-    <AssemblyVersion>1.0.6</AssemblyVersion>
-    <FileVersion>1.0.6.20260713</FileVersion>
+    <Version>1.0.7</Version>
+    <AssemblyVersion>1.0.7</AssemblyVersion>
+    <FileVersion>1.0.7.20260713</FileVersion>
     <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
     <NoWarn>$(NoWarn);7035</NoWarn>
     <PackageReadmeFile>README.md</PackageReadmeFile>
