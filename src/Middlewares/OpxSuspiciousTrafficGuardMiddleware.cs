@@ -78,45 +78,85 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 		var deniedIp = parsedIpAddress is not null
 			? settings.DeniedIpMatcher.IsMatch(parsedIpAddress)
 			: settings.DeniedIpMatcher.IsMatch(ipAddress);
-		var reason = deniedIp
+		var requestReason = deniedIp
 			? $"Denied IP {ipAddress}"
 			: FindSuspiciousReason(context, settings);
 
-		if (reason is null)
+		if (requestReason is not null && settings.Block)
+		{
+			RecordSuspicious(context, requestReason, settings, null);
+			_metrics?.IncrementSuspiciousBlocked();
+			if (settings.BlockedResponseMode.Equals("Minimal", StringComparison.OrdinalIgnoreCase))
+			{
+				await WriteMinimalBlockedResponseAsync(context, settings);
+				return;
+			}
+
+			if (settings.BlockedResponseMode.Equals("WrappedFast", StringComparison.OrdinalIgnoreCase))
+			{
+				await WriteWrappedFastBlockedResponseAsync(context, settings);
+				return;
+			}
+
+			await ApiResponseObjectValue.ShowErrorResponseAsync(context, settings.StatusCode, new ApiErrorValue
+			{
+				Message = "Suspicious traffic detected",
+				Id = requestReason,
+				ObjectName = context.Request.Path.ToString()
+			});
+			return;
+		}
+
+		var monitorResponse = settings.ResponseStatusCodes.Count > 0 || settings.SlowRequestMilliseconds > 0;
+		if (requestReason is null && !monitorResponse)
 		{
 			await _next(context);
 			return;
 		}
 
+		var correlationId = ResolveCorrelationId(context);
+		context.Response.OnStarting(() =>
+		{
+			context.Response.Headers["X-Correlation-ID"] = correlationId;
+			return Task.CompletedTask;
+		});
+
+		var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		try
+		{
+			await _next(context);
+		}
+		finally
+		{
+			var elapsedMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+			var reasons = new List<string>(3);
+			if (requestReason is not null)
+			{
+				reasons.Add(requestReason);
+			}
+
+			if (settings.ResponseStatusCodes.Contains(context.Response.StatusCode))
+			{
+				reasons.Add($"status:{context.Response.StatusCode}");
+			}
+
+			if (settings.SlowRequestMilliseconds > 0 && elapsedMilliseconds >= settings.SlowRequestMilliseconds)
+			{
+				reasons.Add($"slow:{elapsedMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}ms");
+			}
+
+			if (reasons.Count > 0)
+			{
+				RecordSuspicious(context, string.Join(';', reasons.Distinct(StringComparer.OrdinalIgnoreCase)), settings, elapsedMilliseconds);
+			}
+		}
+	}
+
+	private void RecordSuspicious(HttpContext context, string reason, SuspiciousTrafficSettings settings, double? elapsedMilliseconds)
+	{
 		_metrics?.IncrementSuspiciousDetected();
 		context.Items["OpxSuspiciousReason"] = reason;
-		WriteSecurityIssueLog(context, reason);
-
-		if (!settings.Block)
-		{
-			await _next(context);
-			return;
-		}
-
-		_metrics?.IncrementSuspiciousBlocked();
-		if (settings.BlockedResponseMode.Equals("Minimal", StringComparison.OrdinalIgnoreCase))
-		{
-			await WriteMinimalBlockedResponseAsync(context, settings);
-			return;
-		}
-
-		if (settings.BlockedResponseMode.Equals("WrappedFast", StringComparison.OrdinalIgnoreCase))
-		{
-			await WriteWrappedFastBlockedResponseAsync(context, settings);
-			return;
-		}
-
-		await ApiResponseObjectValue.ShowErrorResponseAsync(context, settings.StatusCode, new ApiErrorValue
-		{
-			Message = "Suspicious traffic detected",
-			Id = reason,
-			ObjectName = context.Request.Path.ToString()
-		});
+		WriteSecurityIssueLog(context, reason, settings, elapsedMilliseconds);
 	}
 
 	private string? FindSuspiciousReason(HttpContext context, SuspiciousTrafficSettings settings)
@@ -125,6 +165,15 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 		var query = context.Request.QueryString.ToString();
 		var userAgent = context.Request.Headers.UserAgent.ToString();
 		var referer = context.Request.Headers.Referer.ToString();
+		if (settings.RequestMaxPathLength > 0 && path.Length > settings.RequestMaxPathLength)
+		{
+			return $"long-path:{path.Length}";
+		}
+
+		if (settings.RequestMaxQueryLength > 0 && query.Length > settings.RequestMaxQueryLength)
+		{
+			return $"long-query:{query.Length}";
+		}
 
 		foreach (var pattern in settings.Patterns)
 		{
@@ -154,15 +203,14 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 		return null;
 	}
 
-	private void WriteSecurityIssueLog(HttpContext context, string reason)
+	private void WriteSecurityIssueLog(HttpContext context, string reason, SuspiciousTrafficSettings settings, double? elapsedMilliseconds)
 	{
-		var settings = GetSettings();
 		if (!settings.SecurityIssueLogEnabled || !ShouldWriteSecurityIssueLog(settings))
 		{
 			return;
 		}
 
-		var message = BuildSecurityIssueMessage(context, reason, settings);
+		var message = BuildSecurityIssueMessage(context, reason, settings, elapsedMilliseconds);
 		var writeLogger = settings.SecurityIssueLogOutput.Equals("Logger", StringComparison.OrdinalIgnoreCase)
 			|| settings.SecurityIssueLogOutput.Equals("Both", StringComparison.OrdinalIgnoreCase);
 		var writeFile = settings.SecurityIssueLogOutput.Equals("File", StringComparison.OrdinalIgnoreCase)
@@ -268,6 +316,10 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 				.Where(path => !string.IsNullOrWhiteSpace(path))
 				.Select(path => new PathString(path))
 				.ToArray(),
+			(_configuration.GetSection("OpxApiProtection:SuspiciousTraffic:ResponseStatusCodes").Get<int[]>() ?? []).ToHashSet(),
+			Math.Max(0, _configuration.GetValue("OpxApiProtection:SuspiciousTraffic:SlowRequestMilliseconds", 0d)),
+			Math.Max(0, _configuration.GetValue("OpxApiProtection:SuspiciousTraffic:MaxPathLength", 0)),
+			Math.Max(0, _configuration.GetValue("OpxApiProtection:SuspiciousTraffic:MaxQueryLength", 0)),
 			_configuration.GetValue("OpxApiProtection:SecurityIssueLog:Enabled", true),
 			_configuration.GetValue("OpxApiProtection:SecurityIssueLog:Output", "File") ?? "File",
 			_configuration.GetValue("OpxApiProtection:SecurityIssueLog:FilePath", "logs/security-issue-log-{date}.log") ?? "logs/security-issue-log-{date}.log",
@@ -281,7 +333,7 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 			OpxIpMatcher.Create(_configuration.GetSection("OpxApiProtection:SuspiciousTraffic:DeniedIpAddresses").Get<string[]>() ?? []));
 	}
 
-	private static string BuildSecurityIssueMessage(HttpContext context, string reason, SuspiciousTrafficSettings settings)
+	private static string BuildSecurityIssueMessage(HttpContext context, string reason, SuspiciousTrafficSettings settings, double? elapsedMilliseconds)
 	{
 		var path = CleanLogField(context.Request.Path.ToString(), settings.MaxPathLength);
 		var query = CleanLogField(context.Request.QueryString.ToString(), settings.MaxQueryLength);
@@ -289,9 +341,28 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 		var host = CleanLogField(context.Request.Host.ToString(), settings.MaxHeaderLength);
 		var userAgent = CleanLogField(context.Request.Headers.UserAgent.ToString(), settings.MaxHeaderLength);
 		var sanitizedReason = CleanLogField(reason, settings.MaxReasonLength);
+		if (settings.SecurityIssueLogFormat.Equals("GatewayText", StringComparison.OrdinalIgnoreCase))
+		{
+			var correlationId = CleanLogField(ResolveCorrelationId(context), settings.MaxHeaderLength);
+			var forwarded = CleanLogField(context.Request.Headers["X-Forwarded-For"].FirstOrDefault(), settings.MaxHeaderLength);
+			var elapsed = (elapsedMilliseconds ?? 0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+			return $"id={correlationId} {context.Request.Method} {path}{query} status={context.Response.StatusCode} elapsed={elapsed}ms ip={ValueOrDash(ip)} forwarded={ValueOrDash(forwarded)} host={ValueOrDash(host)} req={FormatBytes(context.Request.ContentLength)} res={FormatBytes(context.Response.ContentLength)} ua=\"{ValueOrDash(userAgent).Replace('\"', '\'')}\" suspicious=true suspiciousReason=\"{ValueOrDash(sanitizedReason).Replace('\"', '\'')}\"";
+		}
 
 		return $"SecurityIssue {context.Request.Method} {path}{query} | IP={ip} | Host={host} | UserAgent={userAgent} | Reason={sanitizedReason}";
 	}
+
+	private static string ResolveCorrelationId(HttpContext context)
+	{
+		var header = context.Request.Headers["X-Correlation-ID"].FirstOrDefault();
+		return string.IsNullOrWhiteSpace(header) ? context.TraceIdentifier : header.Trim();
+	}
+
+	private static string FormatBytes(long? value) => value.HasValue
+		? $"{value.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}B"
+		: "-";
+
+	private static string ValueOrDash(string value) => string.IsNullOrWhiteSpace(value) ? "-" : value;
 
 	private static string CleanLogField(string? value, int maxLength)
 	{
@@ -364,6 +435,10 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 		string[] Patterns,
 		Regex[] RegexPatterns,
 		PathString[] ExcludedPaths,
+		IReadOnlySet<int> ResponseStatusCodes,
+		double SlowRequestMilliseconds,
+		int RequestMaxPathLength,
+		int RequestMaxQueryLength,
 		bool SecurityIssueLogEnabled,
 		string SecurityIssueLogOutput,
 		string SecurityIssueLogFilePath,

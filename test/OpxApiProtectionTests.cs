@@ -218,6 +218,74 @@ public class OpxApiProtectionTests
 	}
 
 	[Test]
+	public async Task SuspiciousTrafficGuard_WhenResponseStatusIsMonitored_RecordsWithoutBlocking()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			context =>
+			{
+				context.Response.StatusCode = StatusCodes.Status404NotFound;
+				return Task.CompletedTask;
+			},
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:ResponseStatusCodes:0"] = "404"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+
+		await middleware.InvokeAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status404NotFound));
+			Assert.That(context.Items["OpxSuspiciousReason"], Is.EqualTo("status:404"));
+		});
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenCleanResponseIsNotMonitored_DoesNotRecord()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ => Task.CompletedTask,
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:ResponseStatusCodes:0"] = "404"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenRequestIsSlow_RecordsElapsedReason()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			async _ => await Task.Delay(20),
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:SlowRequestMilliseconds"] = "1"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(context.Items["OpxSuspiciousReason"]?.ToString(), Does.StartWith("slow:"));
+	}
+
+	[Test]
 	public async Task SuspiciousTrafficGuard_WithSecurityIssueLogSampleRate_WritesSampledLogs()
 	{
 		var root = CreateTempDirectory();

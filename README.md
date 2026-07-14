@@ -127,6 +127,10 @@ Configuration:
       "Block": true,
       "StatusCode": 400,
       "BlockedResponseMode": "WrappedFast",
+      "ResponseStatusCodes": [],
+      "SlowRequestMilliseconds": 0,
+      "MaxPathLength": 0,
+      "MaxQueryLength": 0,
       "RegexTimeoutMilliseconds": 100,
       "ExcludedPathPrefixes": [
         "/health",
@@ -255,6 +259,9 @@ Suspicious traffic guard:
 - supports IP/CIDR allowlist and denylist through `AllowedIpAddresses` and `DeniedIpAddresses`
 - stores the matched reason in `HttpContext.Items["OpxSuspiciousReason"]`
 - can log only or block request based on `Block`
+- can monitor selected downstream response codes with `ResponseStatusCodes`
+- can flag slow downstream responses with `SlowRequestMilliseconds`
+- can flag oversized paths and queries with `MaxPathLength` and `MaxQueryLength`; `0` disables each limit
 - caches pattern/regex settings until configuration reload
 - compiles regex patterns and applies a regex timeout
 - skips excluded path prefixes before scanning
@@ -265,6 +272,7 @@ Suspicious traffic guard:
 - sanitizes CR/LF/TAB in log fields and truncates long path, query, header, and reason values
 - drains queued security issue logs during graceful shutdown
 - supports `QueueCapacity`, `BatchSize`, and `FlushIntervalMilliseconds` for file log batching
+- supports `SecurityIssueLog:Format: "GatewayText"` for the gateway access-log format used by the suspicious HTML report generator
 
 Authorization guard:
 

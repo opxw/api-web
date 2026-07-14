@@ -139,7 +139,9 @@ public sealed class OpxSecurityIssueLogWriter : BackgroundService
 					type = "SecurityIssue",
 					message = entry.Message
 				})
-				: $"{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff} {entry.Message}");
+				: entry.Format.Equals("GatewayText", StringComparison.OrdinalIgnoreCase)
+					? $"[{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] {entry.Message}"
+					: $"{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff} {entry.Message}");
 			await File.AppendAllLinesAsync(group.Key, lines, cancellationToken);
 		}
 
