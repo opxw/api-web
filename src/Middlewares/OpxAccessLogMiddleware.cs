@@ -1,5 +1,6 @@
 // Copyright (c) 2026 - opx
 using System.Diagnostics;
+using Opx.Api.Web.Protection;
 
 namespace Opx.Api.Web.Middlewares;
 
@@ -45,7 +46,8 @@ public sealed class OpxAccessLogMiddleware
 
 	private void WriteLog(HttpContext context, long elapsedMilliseconds)
 	{
-		var message = $"Access {context.Request.Method} {context.Request.Path}{context.Request.QueryString} => {context.Response.StatusCode} in {elapsedMilliseconds} ms | IP={GetClientIpAddress(context)} | Host={context.Request.Host} | UserAgent={context.Request.Headers.UserAgent} | Suspicious={context.Items["OpxSuspiciousReason"] ?? "-"}";
+		var clientIp = OpxClientIpResolver.ResolveDetails(context, _configuration);
+		var message = $"Access {context.Request.Method} {context.Request.Path}{context.Request.QueryString} => {context.Response.StatusCode} in {elapsedMilliseconds} ms | IP={clientIp.Text} | PeerIP={clientIp.PeerText} | IPSource={clientIp.Source} | Host={context.Request.Host} | UserAgent={context.Request.Headers.UserAgent} | Suspicious={context.Items["OpxSuspiciousReason"] ?? "-"}";
 
 		if (UseLoggerOutput())
 		{
@@ -56,17 +58,6 @@ public sealed class OpxAccessLogMiddleware
 		{
 			WriteFileLog(message);
 		}
-	}
-
-	private static string GetClientIpAddress(HttpContext context)
-	{
-		if (context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor)
-			&& !string.IsNullOrWhiteSpace(forwardedFor))
-		{
-			return forwardedFor.ToString().Split(',')[0].Trim();
-		}
-
-		return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 	}
 
 	private bool UseLoggerOutput()
@@ -101,4 +92,3 @@ public sealed class OpxAccessLogMiddleware
 		File.AppendAllText(filePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
 	}
 }
-

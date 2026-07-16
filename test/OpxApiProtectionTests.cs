@@ -3,18 +3,23 @@ using System.Diagnostics;
 using System.Net;
 using System.Security.Claims;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using Opx.Api.Web.Controllers;
 using Opx.Api.Web.Logs;
 using Opx.Api.Web.Middlewares;
 using Opx.Api.Web.Protection;
+using Opx.Web.Framework;
+using Opx.Web.Framework.Options;
 
 namespace Opx.Api.Web.Tests;
 
@@ -26,12 +31,7 @@ public class OpxApiProtectionTests
 	{
 		var context = CreateContext();
 		var middleware = new OpxSecurityHeadersMiddleware(
-			_ =>
-			{
-				context.Response.Headers.Server = "Kestrel";
-				context.Response.Headers["X-Powered-By"] = "ASP.NET";
-				return Task.CompletedTask;
-			},
+			_ => Task.CompletedTask,
 			CreateConfiguration(new Dictionary<string, string?>
 			{
 				["OpxApiProtection:SecurityHeaders:Enabled"] = "true"
@@ -51,7 +51,7 @@ public class OpxApiProtectionTests
 	}
 
 	[Test]
-	public async Task ApiProtectionFast_WhenSuspiciousRequest_BlocksAndAddsSecurityHeaders()
+	public async Task ApiProtectionFastMiddleware_WhenSuspiciousRequest_BlocksAndAddsSecurityHeaders()
 	{
 		var configuration = CreateConfiguration(new Dictionary<string, string?>
 		{
@@ -74,6 +74,49 @@ public class OpxApiProtectionTests
 			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(context.Response.Headers["X-Content-Type-Options"].ToString(), Is.EqualTo("nosniff"));
 		});
+	}
+
+	[Test]
+	public async Task ApiProtectionFast_WhenRegisteredTwice_AddsEachSecurityHeaderOnce()
+	{
+		var builder = WebApplication.CreateBuilder();
+		builder.WebHost.UseTestServer();
+		builder.Services.AddOpxWebFramework();
+		var app = builder.Build();
+		app.UseOpxApiProtectionFast();
+		app.UseOpxApiProtectionFast();
+		app.Run(context => context.Response.WriteAsync("ok"));
+
+		await app.StartAsync();
+		try
+		{
+			using var response = await app.GetTestClient().GetAsync("/");
+
+			Assert.Multiple(() =>
+			{
+				Assert.That(response.Headers.GetValues("X-Content-Type-Options").Single(), Is.EqualTo("nosniff"));
+				Assert.That(response.Headers.GetValues("Referrer-Policy").Count(), Is.EqualTo(1));
+				Assert.That(response.Headers.GetValues("X-Frame-Options").Count(), Is.EqualTo(1));
+			});
+		}
+		finally
+		{
+			await app.DisposeAsync();
+		}
+	}
+
+	[Test]
+	public void ApiProtection_WhenNormalAndFastModesAreCombined_ThrowsAtStartup()
+	{
+		var services = new ServiceCollection()
+			.AddOpxWebFramework()
+			.BuildServiceProvider();
+		var app = new ApplicationBuilder(services);
+		app.UseOpxApiProtectionFast();
+
+		var exception = Assert.Throws<InvalidOperationException>(() => app.UseOpxApiProtection());
+
+		Assert.That(exception!.Message, Does.Contain("cannot be combined"));
 	}
 
 	[Test]
@@ -131,6 +174,157 @@ public class OpxApiProtectionTests
 		{
 			Assert.That(nextCalled, Is.True);
 			Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+		});
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenDefaultPatternsDisabled_DoesNotRestoreRemovedPattern()
+	{
+		var nextCalled = false;
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ =>
+			{
+				nextCalled = true;
+				return Task.CompletedTask;
+			},
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:UseDefaultPatterns"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:Patterns:0"] = "sqlmap"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+		context.Request.Path = "/.env";
+
+		await middleware.InvokeAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(nextCalled, Is.True);
+			Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+		});
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenPathIsOutsideProtectedPrefixes_SkipsScan()
+	{
+		var nextCalled = false;
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ =>
+			{
+				nextCalled = true;
+				return Task.CompletedTask;
+			},
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:0"] = "/api"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+		context.Request.Path = "/public/.env";
+
+		await middleware.InvokeAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(nextCalled, Is.True);
+			Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+		});
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenPathIsInsideProtectedPrefixes_BlocksMatch()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ => Task.CompletedTask,
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:0"] = "/api"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+		context.Request.Path = "/api/.env";
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(context.Items["OpxSuspiciousReason"], Is.EqualTo(".env"));
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenProtectedPathIsRemovedOnReload_StopsScanningIt()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+			["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:0"] = "/api",
+			["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:1"] = "/admin"
+		});
+		var nextCalls = 0;
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ =>
+			{
+				Interlocked.Increment(ref nextCalls);
+				return Task.CompletedTask;
+			},
+			configuration,
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var protectedContext = CreateContext();
+		protectedContext.Request.Path = "/admin/.env";
+
+		await middleware.InvokeAsync(protectedContext);
+		configuration["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:1"] = null;
+		((IConfigurationRoot)configuration).Reload();
+		var removedContext = CreateContext();
+		removedContext.Request.Path = "/admin/.env";
+
+		await middleware.InvokeAsync(removedContext);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(protectedContext.Items["OpxSuspiciousReason"], Is.EqualTo(".env"));
+			Assert.That(removedContext.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+			Assert.That(nextCalls, Is.EqualTo(1));
+		});
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenLastProtectedPathIsRemovedAndScanAllDisabled_SkipsScan()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+			["OpxApiProtection:SuspiciousTraffic:ScanAllPaths"] = "false",
+			["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:0"] = "/admin"
+		});
+		var nextCalls = 0;
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ =>
+			{
+				Interlocked.Increment(ref nextCalls);
+				return Task.CompletedTask;
+			},
+			configuration,
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		configuration["OpxApiProtection:SuspiciousTraffic:ProtectedPathPrefixes:0"] = null;
+		((IConfigurationRoot)configuration).Reload();
+		var context = CreateContext();
+		context.Request.Path = "/admin/.env";
+
+		await middleware.InvokeAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+			Assert.That(nextCalls, Is.EqualTo(1));
 		});
 	}
 
@@ -286,6 +480,119 @@ public class OpxApiProtectionTests
 	}
 
 	[Test]
+	public async Task SuspiciousTrafficGuard_WhenRequestIsBelowSlowThreshold_DoesNotRecord()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			async _ => await Task.Delay(5),
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:SlowRequestMilliseconds"] = "5000"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenSlowResponseAliasIsConfigured_RecordsElapsedReason()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			async _ => await Task.Delay(20),
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:SlowResponseMilliseconds"] = "1"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(context.Items["OpxSuspiciousReason"]?.ToString(), Does.StartWith("slow:"));
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenLegacySlowRequestMsIsHigh_DoesNotRecordFastResponse()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			async _ => await Task.Delay(5),
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:BlockRequest"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:SlowRequestMs"] = "50000000"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(context.Items.ContainsKey("OpxSuspiciousReason"), Is.False);
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenLegacyBlockSettingsAreUsed_AppliesStatusAndMessage()
+	{
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ => Task.CompletedTask,
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:BlockRequest"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:BlockStatusCode"] = "403",
+				["OpxApiProtection:SuspiciousTraffic:BlockResponseBody"] = "Request blocked"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+		context.Request.Path = "/.env";
+
+		await middleware.InvokeAsync(context);
+		var response = await ReadResponseAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo("403"));
+			Assert.That(response.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("Request blocked"));
+		});
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_ModernBlockSettingOverridesLegacySetting()
+	{
+		var nextCalled = false;
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ =>
+			{
+				nextCalled = true;
+				return Task.CompletedTask;
+			},
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:Block"] = "false",
+				["OpxApiProtection:SuspiciousTraffic:BlockRequest"] = "true"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+		context.Request.Path = "/.env";
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(nextCalled, Is.True);
+	}
+
+	[Test]
 	public async Task SuspiciousTrafficGuard_WithSecurityIssueLogSampleRate_WritesSampledLogs()
 	{
 		var root = CreateTempDirectory();
@@ -430,6 +737,56 @@ public class OpxApiProtectionTests
 	}
 
 	[Test]
+	public async Task SuspiciousTrafficGuard_CloudflareTunnelLog_WritesResolvedPeerAndSource()
+	{
+		var root = CreateTempDirectory();
+		var date = DateTime.Now.ToString("yyyyMMdd");
+		var logPath = Path.Combine(root, "logs", $"security-issue-log-{date}.log");
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+			["OpxApiProtection:SuspiciousTraffic:Block"] = "true",
+			["OpxApiProtection:SecurityIssueLog:Enabled"] = "true",
+			["OpxApiProtection:SecurityIssueLog:Output"] = "File",
+			["OpxApiProtection:SecurityIssueLog:FilePath"] = "logs/security-issue-log-{date}.log",
+			["OpxApiProtection:ClientIp:TrustForwardedHeaders"] = "true",
+			["OpxApiProtection:ClientIp:HeaderNames:0"] = "CF-Connecting-IP"
+		});
+		var writer = new OpxSecurityIssueLogWriter(NullLogger<OpxSecurityIssueLogWriter>.Instance);
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ => Task.CompletedTask,
+			configuration,
+			new TestWebHostEnvironment(root),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance,
+			writer);
+
+		try
+		{
+			await writer.StartAsync(CancellationToken.None);
+			var context = CreateContext();
+			context.Connection.RemoteIpAddress = IPAddress.Loopback;
+			context.Request.Headers["CF-Connecting-IP"] = "203.0.113.120";
+			context.Request.Path = "/.env";
+
+			await middleware.InvokeAsync(context);
+			await writer.FlushAsync(CancellationToken.None);
+
+			var line = (await File.ReadAllLinesAsync(logPath)).Single();
+			Assert.Multiple(() =>
+			{
+				Assert.That(line, Does.Contain("IP=203.0.113.120"));
+				Assert.That(line, Does.Contain("PeerIP=127.0.0.1"));
+				Assert.That(line, Does.Contain("IPSource=CF-Connecting-IP"));
+			});
+		}
+		finally
+		{
+			await writer.StopAsync(CancellationToken.None);
+			Directory.Delete(root, true);
+		}
+	}
+
+	[Test]
 	public async Task SuspiciousTrafficGuard_WhenIpIsAllowed_SkipsScan()
 	{
 		var nextCount = 0;
@@ -449,6 +806,36 @@ public class OpxApiProtectionTests
 		var context = CreateContext();
 		context.Request.Path = "/.env";
 		context.Connection.RemoteIpAddress = IPAddress.Parse("127.0.0.1");
+
+		await middleware.InvokeAsync(context);
+
+		Assert.That(nextCount, Is.EqualTo(1));
+	}
+
+	[Test]
+	public async Task SuspiciousTrafficGuard_WhenRealIpHeaderIsAllowed_SkipsGatewayIp()
+	{
+		var nextCount = 0;
+		var middleware = new OpxSuspiciousTrafficGuardMiddleware(
+			_ =>
+			{
+				Interlocked.Increment(ref nextCount);
+				return Task.CompletedTask;
+			},
+			CreateConfiguration(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:SuspiciousTraffic:Enabled"] = "true",
+				["OpxApiProtection:SuspiciousTraffic:AllowedIpAddresses:0"] = "203.0.113.10",
+				["OpxApiProtection:ClientIp:TrustForwardedHeaders"] = "true",
+				["OpxApiProtection:ClientIp:TrustedProxies:0"] = "10.0.0.5",
+				["OpxApiProtection:ClientIp:HeaderNames:0"] = "X-Real-IP"
+			}),
+			new TestWebHostEnvironment(Path.GetTempPath()),
+			NullLogger<OpxSuspiciousTrafficGuardMiddleware>.Instance);
+		var context = CreateContext();
+		context.Request.Path = "/.env";
+		context.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.5");
+		context.Request.Headers["X-Real-IP"] = "203.0.113.10";
 
 		await middleware.InvokeAsync(context);
 
@@ -556,6 +943,82 @@ public class OpxApiProtectionTests
 	}
 
 	[Test]
+	public void ProtectionConfigurationValidator_WhenGatewayTextIsConfigured_ReturnsNoError()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:SecurityIssueLog:Format"] = "GatewayText"
+		});
+
+		var errors = OpxProtectionConfigurationValidator.Validate(configuration).ToArray();
+
+		Assert.That(errors, Is.Empty);
+	}
+
+	[TestCase("BlockStatusCode", "399")]
+	[TestCase("StatusCode", "600")]
+	public void ProtectionConfigurationValidator_WhenBlockedStatusCodeIsInvalid_ReturnsError(string key, string value)
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			[$"OpxApiProtection:SuspiciousTraffic:{key}"] = value
+		});
+
+		var errors = OpxProtectionConfigurationValidator.Validate(configuration).ToArray();
+
+		Assert.That(errors, Has.Some.Contains("StatusCode"));
+	}
+
+	[Test]
+	public void ProtectionConfigurationValidator_WhenLegacySlowThresholdIsNegative_ReturnsError()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:SuspiciousTraffic:SlowRequestMs"] = "-1"
+		});
+
+		var errors = OpxProtectionConfigurationValidator.Validate(configuration).ToArray();
+
+		Assert.That(errors, Has.Some.Contains("cannot be negative"));
+	}
+
+	[Test]
+	public void AddOpxApiWeb_WhenLegacyIncludeInAccessLogIsEnabled_MapsFrameworkOption()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:SuspiciousTraffic:IncludeInAccessLog"] = "true"
+		});
+		using var services = new ServiceCollection()
+			.AddLogging()
+			.AddOpxApiWeb(configuration)
+			.BuildServiceProvider();
+
+		var options = services.GetRequiredService<IOptions<OpxWebFrameworkOptions>>().Value;
+
+		Assert.That(options.AccessLog.IncludeSuspiciousRequests, Is.True);
+	}
+
+	[Test]
+	public void ChinookAppSettings_AreValidProtectionConfigurations()
+	{
+		var repositoryRoot = FindRepositoryRoot();
+		var sampleRoot = Path.Combine(repositoryRoot.Parent!.FullName, "api-samples");
+		var files = Directory.GetFiles(sampleRoot, "appsettings*.json", SearchOption.AllDirectories)
+			.Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+				&& !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+			.ToArray();
+
+		Assert.That(files, Is.Not.Empty);
+		foreach (var file in files)
+		{
+			var configuration = new ConfigurationBuilder().AddJsonFile(file).Build();
+			var errors = OpxProtectionConfigurationValidator.Validate(configuration).ToArray();
+			Assert.That(errors, Is.Empty, file);
+		}
+	}
+
+	[Test]
 	public void ProtectionConfigurationValidator_WhenInvalidRateLimitAlgorithm_ReturnsError()
 	{
 		var errors = OpxProtectionConfigurationValidator.Validate(CreateConfiguration(new Dictionary<string, string?>
@@ -564,6 +1027,31 @@ public class OpxApiProtectionTests
 		})).ToArray();
 
 		Assert.That(errors.Single(), Does.Contain("Algorithm"));
+	}
+
+	[Test]
+	public void ProtectionConfigurationValidator_WhenWebSocketLimitsAreInvalid_ReturnsErrors()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:WebSocket:Enabled"] = "true",
+			["OpxApiProtection:WebSocket:Path"] = "ws",
+			["OpxApiProtection:WebSocket:ReceiveBufferBytes"] = "512",
+			["OpxApiProtection:WebSocket:MaxMessageBytes"] = "256",
+			["OpxApiProtection:WebSocket:IdleTimeoutSeconds"] = "-1",
+			["OpxApiProtection:WebSocket:MessageRateLimitWindowSeconds"] = "0"
+		});
+
+		var errors = OpxProtectionConfigurationValidator.Validate(configuration).ToArray();
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(errors, Has.Some.Contains("WebSocket:Path"));
+			Assert.That(errors, Has.Some.Contains("ReceiveBufferBytes"));
+			Assert.That(errors, Has.Some.Contains("MaxMessageBytes"));
+			Assert.That(errors, Has.Some.Contains("IdleTimeoutSeconds"));
+			Assert.That(errors, Has.Some.Contains("MessageRateLimitWindowSeconds"));
+		});
 	}
 
 	[Test]
@@ -731,6 +1219,41 @@ public class OpxApiProtectionTests
 			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.TooManyRequests).ToString()));
 			Assert.That(response.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("Too Many Requests"));
+		});
+	}
+
+	[Test]
+	public async Task RateLimiting_WhenRealIpHeaderDiffers_UsesRealIpInsteadOfGatewayIp()
+	{
+		var configuration = CreateConfiguration(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:RateLimiting:Enabled"] = "true",
+			["OpxApiProtection:RateLimiting:Limit"] = "1",
+			["OpxApiProtection:RateLimiting:WindowSeconds"] = "60",
+			["OpxApiProtection:ClientIp:TrustForwardedHeaders"] = "true",
+			["OpxApiProtection:ClientIp:TrustedProxies:0"] = "10.0.0.5",
+			["OpxApiProtection:ClientIp:HeaderNames:0"] = "X-Real-IP"
+		});
+		var path = $"/rate-real-ip-{Guid.NewGuid():N}";
+		var firstContext = CreateContext();
+		firstContext.Request.Path = path;
+		firstContext.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.5");
+		firstContext.Request.Headers["X-Real-IP"] = "203.0.113.10";
+		var secondContext = CreateContext();
+		secondContext.Request.Path = path;
+		secondContext.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.5");
+		secondContext.Request.Headers["X-Real-IP"] = "203.0.113.11";
+		var middleware = new OpxRateLimitingMiddleware(_ => Task.CompletedTask, configuration);
+
+		await middleware.InvokeAsync(firstContext);
+		await middleware.InvokeAsync(secondContext);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(firstContext.Response.HasStarted, Is.False);
+			Assert.That(secondContext.Response.HasStarted, Is.False);
+			Assert.That(firstContext.Response.Body.Length, Is.Zero);
+			Assert.That(secondContext.Response.Body.Length, Is.Zero);
 		});
 	}
 
@@ -1444,6 +1967,17 @@ public class OpxApiProtectionTests
 				Body = new MemoryStream()
 			}
 		};
+	}
+
+	private static DirectoryInfo FindRepositoryRoot()
+	{
+		var directory = new DirectoryInfo(AppContext.BaseDirectory);
+		while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Opx.Api.Web.slnx")))
+		{
+			directory = directory.Parent;
+		}
+
+		return directory ?? throw new DirectoryNotFoundException("Unable to locate the api-web repository root.");
 	}
 
 	private static IConfiguration CreateConfiguration(Dictionary<string, string?> values)

@@ -11,6 +11,7 @@ using Opx.Api.Web.Logs;
 using Opx.Api.Web.Middlewares;
 using Opx.Api.Web.Options;
 using Opx.Api.Web.Protection;
+using Opx.Api.Web.WebSockets;
 using Opx.Web.Framework;
 using Opx.Web.Framework.Options;
 using System.Collections.Concurrent;
@@ -19,13 +20,19 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 namespace Opx.Api.Web
 {
 	public static class SetupExtension
 	{
+		private const string FrameworkMiddlewareMarkerPrefix = "Opx.Web.Framework.Middleware.";
+		private const string ApiMiddlewareMarkerPrefix = "Opx.Api.Web.Middleware.";
+		private const string ApiProtectionModeMarker = "Opx.Api.Web.ProtectionMode";
 		private static readonly ConditionalWeakTable<WebApplication, object> MappedWebFrameworkApplications = new();
 		private static readonly ConditionalWeakTable<WebApplication, object> MappedEndpointProxyApplications = new();
+		private static readonly ConditionalWeakTable<WebApplication, object> MappedWebSocketApplications = new();
 
 		public static IServiceCollection AddOpxApiWeb(this IServiceCollection services, IConfiguration configuration, Action<OpxWebApiOptions>? configure = null)
 		{
@@ -54,6 +61,7 @@ namespace Opx.Api.Web
 			services.AddSingleton<OpxProtectionMetrics>();
 			services.AddSingleton<OpxProtectionPolicyProvider>();
 			services.AddSingleton<OpxSecurityIssueLogWriter>();
+			services.AddOpxWebSocket();
 			services.AddHostedService<OpxProtectionConfigurationValidator>();
 			services.AddHostedService(provider => provider.GetRequiredService<OpxEndpointLogWriter>());
 			services.AddHostedService(provider => provider.GetRequiredService<OpxSecurityIssueLogWriter>());
@@ -68,6 +76,8 @@ namespace Opx.Api.Web
 
 		public static void UseOpxWebApiHandler(this WebApplication webApplication)
 		{
+			webApplication.UseOpxWebSocket();
+			webApplication.MapOpxWebSocket();
 			MapOpxWebFrameworkOnce(webApplication);
 			webApplication.MapOpxEndpointProxy();
 
@@ -80,6 +90,97 @@ namespace Opx.Api.Web
 			});
 		}
 
+		public static IServiceCollection AddOpxWebSocket(this IServiceCollection services, Action<OpxWebSocketOptions>? configure = null)
+		{
+			var optionsBuilder = services.AddOptions<OpxWebSocketOptions>()
+				.BindConfiguration("OpxApiProtection:WebSocket");
+			if (configure is not null)
+			{
+				optionsBuilder.Configure(configure);
+			}
+
+			services.TryAddScoped<IOpxWebSocketHandler, OpxNoOpWebSocketHandler>();
+			services.TryAddScoped<OpxWebSocketMessageRouter>();
+			services.TryAddSingleton<OpxWebSocketConnectionManager>();
+			services.TryAddEnumerable(ServiceDescriptor.Scoped<IOpxWebSocketMessageHandler, OpxNoOpWebSocketMessageHandler>());
+			services.TryAddSingleton<OpxRedisWebSocketBackplane>();
+			services.TryAddSingleton<IOpxWebSocketBackplane>(provider => provider.GetRequiredService<OpxRedisWebSocketBackplane>());
+			services.TryAddSingleton<IOpxWebSocketConnectionManager>(provider => provider.GetRequiredService<OpxWebSocketConnectionManager>());
+			services.TryAddSingleton<OpxWebSocketEndpoint>();
+			services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, OpxWebSocketLifetimeService>());
+			services.AddHostedService(provider => provider.GetRequiredService<OpxRedisWebSocketBackplane>());
+			return services;
+		}
+
+		public static IServiceCollection AddOpxWebSocketMessageHandler<THandler>(this IServiceCollection services)
+			where THandler : class, IOpxWebSocketMessageHandler
+		{
+			services.AddScoped<IOpxWebSocketMessageHandler, THandler>();
+			return services;
+		}
+
+		public static IServiceCollection AddOpxWebSocket<THandler>(this IServiceCollection services, Action<OpxWebSocketOptions>? configure = null)
+			where THandler : class, IOpxWebSocketHandler
+		{
+			services.AddOpxWebSocket(configure);
+			services.Replace(ServiceDescriptor.Scoped<IOpxWebSocketHandler, THandler>());
+			return services;
+		}
+
+		public static WebApplication UseOpxWebSocket(this WebApplication webApplication)
+		{
+			var options = webApplication.Services.GetRequiredService<IOptionsMonitor<OpxWebSocketOptions>>().CurrentValue;
+			if (!options.Enabled)
+			{
+				return webApplication;
+			}
+
+			var webSocketOptions = new Microsoft.AspNetCore.Builder.WebSocketOptions
+			{
+				KeepAliveInterval = TimeSpan.FromSeconds(Math.Max(1, options.KeepAliveIntervalSeconds)),
+				KeepAliveTimeout = TimeSpan.FromSeconds(Math.Max(1, options.KeepAliveTimeoutSeconds))
+			};
+			foreach (var origin in (options.AllowedOrigins ?? []).Where(origin => !string.IsNullOrWhiteSpace(origin)))
+			{
+				webSocketOptions.AllowedOrigins.Add(origin);
+			}
+
+			webApplication.UseWebSockets(webSocketOptions);
+			return webApplication;
+		}
+
+		public static WebApplication MapOpxWebSocket(this WebApplication webApplication)
+		{
+			if (MappedWebSocketApplications.TryGetValue(webApplication, out _))
+			{
+				return webApplication;
+			}
+
+			var options = webApplication.Services.GetRequiredService<IOptionsMonitor<OpxWebSocketOptions>>().CurrentValue;
+			if (!options.Enabled)
+			{
+				MappedWebSocketApplications.Add(webApplication, new object());
+				return webApplication;
+			}
+
+			if (string.IsNullOrWhiteSpace(options.Path) || !options.Path.StartsWith("/", StringComparison.Ordinal))
+			{
+				throw new InvalidOperationException("OpxApiProtection:WebSocket:Path must start with '/'.");
+			}
+
+			var endpoint = webApplication.MapMethods(options.Path, ["GET"], async context =>
+			{
+				await context.RequestServices.GetRequiredService<OpxWebSocketEndpoint>().HandleAsync(context);
+			});
+			if (options.RequireAuthorization)
+			{
+				endpoint.RequireAuthorization();
+			}
+
+			MappedWebSocketApplications.Add(webApplication, new object());
+			return webApplication;
+		}
+
 		public static void UseOpxWebApiStatusCodePages(this WebApplication webApplication)
 		{
 			webApplication.UseStatusCodePages(async context =>
@@ -90,36 +191,43 @@ namespace Opx.Api.Web
 
 		public static IApplicationBuilder UseOpxEndpointLog(this IApplicationBuilder app)
 		{
-			return app.UseMiddleware<OpxEndpointLogMiddleware>();
+			return UseOnce<OpxEndpointLogMiddleware>(app, ApiMiddlewareMarkerPrefix + "EndpointLog");
 		}
 
 		public static IApplicationBuilder UseOpxSecurityHeaders(this IApplicationBuilder app)
 		{
-			return OpxWebFrameworkExtensions.UseOpxResponseHeaders(app);
+			return UseFrameworkMiddlewareOnce(
+				app,
+				FrameworkMiddlewareMarkerPrefix + "ResponseHeaders",
+				OpxWebFrameworkExtensions.UseOpxResponseHeaders);
 		}
 
 		public static IApplicationBuilder UseOpxRateLimiting(this IApplicationBuilder app)
 		{
-			return app.UseMiddleware<OpxRateLimitingMiddleware>();
+			return UseOnce<OpxRateLimitingMiddleware>(app, ApiMiddlewareMarkerPrefix + "RateLimiting");
 		}
 
 		public static IApplicationBuilder UseOpxSuspiciousTrafficGuard(this IApplicationBuilder app)
 		{
-			return app.UseMiddleware<OpxSuspiciousTrafficGuardMiddleware>();
+			return UseOnce<OpxSuspiciousTrafficGuardMiddleware>(app, ApiMiddlewareMarkerPrefix + "SuspiciousTraffic");
 		}
 
 		public static IApplicationBuilder UseOpxAuthorizationGuard(this IApplicationBuilder app)
 		{
-			return app.UseMiddleware<OpxAuthorizationGuardMiddleware>();
+			return UseOnce<OpxAuthorizationGuardMiddleware>(app, ApiMiddlewareMarkerPrefix + "AuthorizationGuard");
 		}
 
 		public static IApplicationBuilder UseOpxAccessLog(this IApplicationBuilder app)
 		{
-			return OpxWebFrameworkExtensions.UseOpxAccessLog(app);
+			return UseFrameworkMiddlewareOnce(
+				app,
+				FrameworkMiddlewareMarkerPrefix + "AccessLog",
+				OpxWebFrameworkExtensions.UseOpxAccessLog);
 		}
 
 		public static IApplicationBuilder UseOpxApiProtection(this IApplicationBuilder app)
 		{
+			EnsureProtectionMode(app, "Normal");
 			app.UseOpxSecurityHeaders();
 			app.UseOpxRateLimiting();
 			app.UseOpxSuspiciousTrafficGuard();
@@ -131,7 +239,34 @@ namespace Opx.Api.Web
 
 		public static IApplicationBuilder UseOpxApiProtectionFast(this IApplicationBuilder app)
 		{
-			return app.UseMiddleware<OpxApiProtectionFastMiddleware>();
+			EnsureProtectionMode(app, "Fast");
+			app.UseOpxSecurityHeaders();
+
+			var fastMarker = ApiMiddlewareMarkerPrefix + "ProtectionFast";
+			if (app.Properties.ContainsKey(fastMarker))
+			{
+				return app;
+			}
+
+			var individualMarkers = new[]
+			{
+				ApiMiddlewareMarkerPrefix + "RateLimiting",
+				ApiMiddlewareMarkerPrefix + "SuspiciousTraffic",
+				ApiMiddlewareMarkerPrefix + "AuthorizationGuard"
+			};
+			if (individualMarkers.Any(app.Properties.ContainsKey))
+			{
+				throw new InvalidOperationException("UseOpxApiProtectionFast cannot be combined with individually registered API protection middleware.");
+			}
+
+			app.UseMiddleware<OpxApiProtectionFastMiddleware>(false);
+			app.Properties[fastMarker] = true;
+			foreach (var marker in individualMarkers)
+			{
+				app.Properties[marker] = true;
+			}
+
+			return app;
 		}
 
 		public static OpxApiDocument GenerateOpxApiDocs(this WebApplication app, Action<OpxApiDocsOptions>? configure = null)
@@ -277,12 +412,55 @@ namespace Opx.Api.Web
 			options.AccessLog.Enabled = configuration.GetValue("OpxApiProtection:AccessLog:Enabled", options.AccessLog.Enabled);
 			options.AccessLog.Output = ParseLogOutput(configuration.GetValue("OpxApiProtection:AccessLog:Output", options.AccessLog.Output.ToString()));
 			options.AccessLog.FilePath = configuration.GetValue("OpxApiProtection:AccessLog:FilePath", options.AccessLog.FilePath);
+			options.AccessLog.IncludeSuspiciousRequests = configuration.GetValue<bool?>("OpxApiProtection:AccessLog:IncludeSuspiciousRequests")
+				?? configuration.GetValue("OpxApiProtection:SuspiciousTraffic:IncludeInAccessLog", options.AccessLog.IncludeSuspiciousRequests);
 
 			options.LogAccess.Enabled = configuration.GetValue("OpxApiProtection:LogApi:Enabled", options.LogAccess.Enabled);
 			options.LogAccess.RoutePrefix = configuration.GetValue("OpxApiProtection:LogApi:RoutePrefix", options.LogAccess.RoutePrefix);
 			options.LogAccess.RequireAuthorization = configuration.GetValue("OpxApiProtection:LogApi:RequireAuthorization", options.LogAccess.RequireAuthorization);
 			options.LogAccess.AccessLogId = configuration.GetValue("OpxApiProtection:LogApi:AccessLogId", options.LogAccess.AccessLogId);
 			options.LogAccess.SecurityLogId = configuration.GetValue("OpxApiProtection:LogApi:SecurityLogId", options.LogAccess.SecurityLogId);
+		}
+
+		private static IApplicationBuilder UseOnce<TMiddleware>(IApplicationBuilder app, string marker)
+		{
+			if (app.Properties.ContainsKey(marker))
+			{
+				return app;
+			}
+
+			app.UseMiddleware<TMiddleware>();
+			app.Properties[marker] = true;
+			return app;
+		}
+
+		private static IApplicationBuilder UseFrameworkMiddlewareOnce(
+			IApplicationBuilder app,
+			string marker,
+			Func<IApplicationBuilder, IApplicationBuilder> register)
+		{
+			if (app.Properties.ContainsKey(marker))
+			{
+				return app;
+			}
+
+			register(app);
+			app.Properties[marker] = true;
+			return app;
+		}
+
+		private static void EnsureProtectionMode(IApplicationBuilder app, string mode)
+		{
+			if (!app.Properties.TryGetValue(ApiProtectionModeMarker, out var configuredMode))
+			{
+				app.Properties[ApiProtectionModeMarker] = mode;
+				return;
+			}
+
+			if (!string.Equals(configuredMode?.ToString(), mode, StringComparison.Ordinal))
+			{
+				throw new InvalidOperationException($"Opx API protection mode '{configuredMode}' is already registered and cannot be combined with '{mode}'.");
+			}
 		}
 
 		private static OpxLogOutput ParseLogOutput(string? value)

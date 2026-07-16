@@ -45,7 +45,7 @@ public sealed class OpxRateLimitingMiddleware
 		var windowSeconds = Math.Max(1, policy.RateLimitWindowSeconds ?? settings.WindowSeconds);
 		var window = TimeSpan.FromSeconds(windowSeconds);
 		var pathPrefix = GetPathPrefix(context.Request.Path, settings.PathPrefixes);
-		var ipAddress = GetClientIpAddress(context);
+		var ipAddress = OpxClientIpResolver.Resolve(context, _configuration).Text;
 		var key = $"{ipAddress}:{pathPrefix}";
 		var now = DateTimeOffset.UtcNow;
 		CleanupExpiredBuckets(now, settings.CleanupIntervalSeconds);
@@ -132,17 +132,6 @@ public sealed class OpxRateLimitingMiddleware
 				Buckets.TryRemove(item.Key, out _);
 			}
 		}
-	}
-
-	private static string GetClientIpAddress(HttpContext context)
-	{
-		if (context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor)
-			&& !string.IsNullOrWhiteSpace(forwardedFor))
-		{
-			return forwardedFor.ToString().Split(',')[0].Trim();
-		}
-
-		return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 	}
 
 	private static void SetRateLimitHeaders(HttpContext context, int limit, int remaining, int resetSeconds)

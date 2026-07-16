@@ -28,8 +28,6 @@ public sealed class OpxSecurityHeadersMiddleware
 		});
 
 		await _next(context);
-		if (!context.Response.HasStarted)
-			ApplyHeaders(context);
 	}
 
 	private void ApplyHeaders(HttpContext context)

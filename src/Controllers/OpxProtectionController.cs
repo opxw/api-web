@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Opx.Api.Web.Common;
 using Opx.Api.Web.Logs;
 using Opx.Api.Web.Protection;
+using Opx.Api.Web.WebSockets;
 
 namespace Opx.Api.Web.Controllers;
 
@@ -14,15 +15,18 @@ public sealed class OpxProtectionController : OpxApiController
 	private readonly IConfiguration _configuration;
 	private readonly OpxProtectionMetrics _metrics;
 	private readonly OpxSecurityIssueLogWriter _securityIssueLogWriter;
+	private readonly IOpxWebSocketConnectionManager? _webSocket;
 
 	public OpxProtectionController(
 		IConfiguration configuration,
 		OpxProtectionMetrics metrics,
-		OpxSecurityIssueLogWriter securityIssueLogWriter)
+		OpxSecurityIssueLogWriter securityIssueLogWriter,
+		IOpxWebSocketConnectionManager? webSocket = null)
 	{
 		_configuration = configuration;
 		_metrics = metrics;
 		_securityIssueLogWriter = securityIssueLogWriter;
+		_webSocket = webSocket;
 	}
 
 	[HttpGet("metrics")]
@@ -53,7 +57,8 @@ public sealed class OpxProtectionController : OpxApiController
 			AuthorizationGuard = _configuration.GetValue("OpxApiProtection:AuthorizationGuard:Enabled", false),
 			SecurityIssueLogDropped = _securityIssueLogWriter.DroppedCount,
 			SecurityIssueLogQueueCapacity = _configuration.GetValue("OpxApiProtection:SecurityIssueLog:QueueCapacity", 8192),
-			EndpointProxy = _configuration.GetValue("OpxEndpointProxy:Enabled", _configuration.GetValue("OpxApiProtection:EndpointProxy:Enabled", false))
+			EndpointProxy = _configuration.GetValue("OpxEndpointProxy:Enabled", _configuration.GetValue("OpxApiProtection:EndpointProxy:Enabled", false)),
+			WebSocket = _webSocket?.GetHealth()
 		});
 	}
 

@@ -87,6 +87,7 @@ function Set-AssemblyFileVersion {
 
     New-Item -ItemType Directory -Force -Path $propertiesDirectory | Out-Null
     @"
+// Copyright (c) 2026 - opx
 using System.Reflection;
 using System.Runtime.CompilerServices;
 

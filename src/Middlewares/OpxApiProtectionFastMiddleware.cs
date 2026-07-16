@@ -6,10 +6,31 @@ namespace Opx.Api.Web.Middlewares;
 
 public sealed class OpxApiProtectionFastMiddleware
 {
-	private readonly OpxSecurityHeadersMiddleware _pipeline;
+	private readonly RequestDelegate _pipeline;
 
 	public OpxApiProtectionFastMiddleware(
 		RequestDelegate next,
+		IConfiguration configuration,
+		IWebHostEnvironment environment,
+		ILogger<OpxSuspiciousTrafficGuardMiddleware> suspiciousLogger,
+		OpxProtectionMetrics? metrics = null,
+		OpxProtectionPolicyProvider? policyProvider = null,
+		OpxSecurityIssueLogWriter? securityIssueLogWriter = null)
+		: this(
+			next,
+			includeSecurityHeaders: true,
+			configuration,
+			environment,
+			suspiciousLogger,
+			metrics,
+			policyProvider,
+			securityIssueLogWriter)
+	{
+	}
+
+	public OpxApiProtectionFastMiddleware(
+		RequestDelegate next,
+		bool includeSecurityHeaders,
 		IConfiguration configuration,
 		IWebHostEnvironment environment,
 		ILogger<OpxSuspiciousTrafficGuardMiddleware> suspiciousLogger,
@@ -27,11 +48,13 @@ public sealed class OpxApiProtectionFastMiddleware
 			metrics,
 			policyProvider);
 		var rateLimiting = new OpxRateLimitingMiddleware(suspicious.InvokeAsync, configuration, metrics, policyProvider);
-		_pipeline = new OpxSecurityHeadersMiddleware(rateLimiting.InvokeAsync, configuration);
+		_pipeline = includeSecurityHeaders
+			? new OpxSecurityHeadersMiddleware(rateLimiting.InvokeAsync, configuration).InvokeAsync
+			: rateLimiting.InvokeAsync;
 	}
 
 	public Task InvokeAsync(HttpContext context)
 	{
-		return _pipeline.InvokeAsync(context);
+		return _pipeline(context);
 	}
 }

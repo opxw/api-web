@@ -14,13 +14,14 @@ Shared ASP.NET Core web helpers for OPX APIs.
 - wrapped binary/file content through `ApiContentData`
 - JWT bearer setup helper
 - optional API protection middleware for security headers, rate limiting, suspicious traffic, authorization guard, and access log
+- optional native WebSocket endpoint with typed routing, topics/groups, multi-connection users, ACK, heartbeat, reconnect-ready protocol, Redis backplane, health metrics, and security limits
 
 ## Install
 
 Add the package:
 
 ```xml
-<PackageReference Include="Opx.Api.Web" Version="1.0.5" />
+<PackageReference Include="Opx.Api.Web" Version="1.0.15" />
 ```
 
 If the application uses `AppService` and `AppResult`, also reference:
@@ -90,7 +91,7 @@ Fast core shortcut:
 app.UseOpxApiProtectionFast();
 ```
 
-`UseOpxApiProtectionFast()` composes security headers, rate limiting, suspicious traffic guard, and authorization guard behind one middleware registration. Keep access/endpoint logging separate when request logging is required.
+`UseOpxApiProtectionFast()` installs the shared framework security-header middleware once, then composes rate limiting, suspicious traffic guard, and authorization guard behind one core middleware registration. Middleware registration is idempotent, but normal and fast protection modes cannot be combined in the same pipeline. Keep access/endpoint logging separate when request logging is required.
 
 Default behavior:
 
@@ -129,9 +130,17 @@ Configuration:
       "BlockedResponseMode": "WrappedFast",
       "ResponseStatusCodes": [],
       "SlowRequestMilliseconds": 0,
+      "SlowResponseMilliseconds": 0,
       "MaxPathLength": 0,
       "MaxQueryLength": 0,
       "RegexTimeoutMilliseconds": 100,
+      "UseDefaultPatterns": false,
+      "ScanAllPaths": false,
+      "ProtectedPathPrefixes": [
+        "/api",
+        "/artists",
+        "/albums"
+      ],
       "ExcludedPathPrefixes": [
         "/health",
         "/openapi",
@@ -157,6 +166,21 @@ Configuration:
         "xp_cmdshell",
         "or 1=1",
         "drop table"
+      ]
+    },
+    "ClientIp": {
+      "TrustForwardedHeaders": false,
+      "TrustAnyProxy": false,
+      "TrustedProxies": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "TrustedNetworks": [],
+      "MaxForwardedEntries": 10,
+      "MaxHeaderValueLength": 4096,
+      "HeaderNames": [
+        "X-Forwarded-For",
+        "X-Real-IP"
       ]
     },
     "AuthorizationGuard": {
@@ -235,6 +259,34 @@ Configuration:
 }
 ```
 
+### Trusted Client IP
+
+Forwarded IP headers are ignored by default because a direct client can spoof them. For Cloudflare Tunnel running on the same machine, bind the API origin to localhost and use:
+
+```json
+"ClientIp": {
+  "TrustForwardedHeaders": true,
+  "TrustAnyProxy": false,
+  "TrustedProxies": [ "127.0.0.1", "::1" ],
+  "TrustedNetworks": [],
+  "HeaderNames": [ "CF-Connecting-IP" ],
+  "MaxForwardedEntries": 10,
+  "MaxHeaderValueLength": 4096
+}
+```
+
+For Nginx, IIS, HAProxy, or an API gateway, replace `TrustedProxies` with the exact immediate proxy IP. Use `TrustedNetworks` only when proxy addresses are dynamic and keep the CIDR narrow. A Docker-hosted tunnel can trust its bridge CIDR, for example `172.18.0.0/16`, after verifying the actual Docker network.
+
+`X-Forwarded-For` is processed from right to left. Trusted proxy hops are removed and the nearest untrusted valid address becomes the client IP. Malformed, oversized, over-limit, or untrusted chains fail closed to `RemoteIpAddress`. `TrustAnyProxy` is an explicit compatibility escape hatch and should not be enabled on a publicly reachable origin.
+
+Access, suspicious, and WebSocket security logs expose three fields:
+
+```text
+IP=203.0.113.10 | PeerIP=127.0.0.1 | IPSource=CF-Connecting-IP
+```
+
+`IP` is the resolved client, `PeerIP` is the machine connected directly to Kestrel, and `IPSource` states whether the value came from a trusted header or `RemoteIpAddress`.
+
 Security headers:
 
 - `X-Content-Type-Options: nosniff`
@@ -256,11 +308,19 @@ Rate limiting:
 Suspicious traffic guard:
 
 - detects common scanner and attack tokens such as `sqlmap`, `.env`, `.git`, SQL tokens, and script tokens
+- limits scanning to `ProtectedPathPrefixes`; set `ScanAllPaths` to `false` so an empty list scans no paths after the final prefix is removed
+- scans all paths for backward compatibility when `ProtectedPathPrefixes` is empty and `ScanAllPaths` is omitted or `true`
+- applies `ExcludedPathPrefixes` before scanning, including paths inside a protected prefix
+- treats configured `Patterns` as the complete source of truth when `UseDefaultPatterns` is `false`
+- refreshes patterns and protected/excluded paths when the configuration provider reloads
 - supports IP/CIDR allowlist and denylist through `AllowedIpAddresses` and `DeniedIpAddresses`
 - stores the matched reason in `HttpContext.Items["OpxSuspiciousReason"]`
 - can log only or block request based on `Block`
 - can monitor selected downstream response codes with `ResponseStatusCodes`
 - can flag slow downstream responses with `SlowRequestMilliseconds`
+- also accepts `SlowResponseMilliseconds` as an alias for the same threshold
+- resolves client IP only from configured headers sent by `TrustedProxies` or `TrustedNetworks`
+- reloads trusted proxy, network, header, and limit settings when configuration reloads
 - can flag oversized paths and queries with `MaxPathLength` and `MaxQueryLength`; `0` disables each limit
 - caches pattern/regex settings until configuration reload
 - compiles regex patterns and applies a regex timeout
@@ -273,6 +333,8 @@ Suspicious traffic guard:
 - drains queued security issue logs during graceful shutdown
 - supports `QueueCapacity`, `BatchSize`, and `FlushIntervalMilliseconds` for file log batching
 - supports `SecurityIssueLog:Format: "GatewayText"` for the gateway access-log format used by the suspicious HTML report generator
+
+Compatibility aliases remain supported for existing appsettings: `BlockRequest` maps to `Block`, `BlockStatusCode` maps to `StatusCode`, `BlockResponseBody` maps to `ResponseMessage`, and `SlowRequestMs`/`SlowResponseMs` map to the millisecond threshold. Modern keys take precedence when both forms are present. `BlockResponseBody` is serialized as the OPX response message, not written as an unescaped raw response body. `SuspiciousTraffic:IncludeInAccessLog` maps to `AccessLog:IncludeSuspiciousRequests`.
 
 Authorization guard:
 
@@ -449,12 +511,182 @@ Example output:
     "FilePath": "logs/access-log-20260712.log",
     "Date": "20260712",
     "Lines": [
-      "2026-07-12 17:57:58.123 Access GET /artists => 200 in 12 ms | IP=127.0.0.1 | Host=localhost:5141 | UserAgent=curl | Suspicious=-"
+      "2026-07-12 17:57:58.123 Access GET /artists => 200 in 12 ms | IP=203.0.113.10 | PeerIP=127.0.0.1 | IPSource=CF-Connecting-IP | Host=localhost:5141 | UserAgent=curl | Suspicious=-"
     ]
   },
   "statusCode": "200"
 }
 ```
+
+## WebSocket
+
+Register a scoped WebSocket handler after `AddOpxApiWeb`:
+
+```csharp
+builder.Services.AddOpxApiWeb(builder.Configuration);
+builder.Services.AddOpxWebSocket<NotificationWebSocketHandler>();
+builder.Services.AddOpxWebSocketMessageHandler<ArtistWatchMessageHandler>();
+```
+
+`UseOpxWebApiHandler()` automatically calls the WebSocket middleware and maps the configured endpoint. No separate `UseWebSockets()` or `MapOpxWebSocket()` call is required.
+
+Configuration:
+
+```json
+{
+  "OpxApiProtection": {
+    "WebSocket": {
+      "Enabled": true,
+      "Path": "/ws/notifications",
+      "RequireAuthorization": true,
+      "SubProtocol": null,
+      "KeepAliveIntervalSeconds": 30,
+      "KeepAliveTimeoutSeconds": 15,
+      "ReceiveBufferBytes": 16384,
+      "MaxMessageBytes": 1048576,
+      "IdleTimeoutSeconds": 120,
+      "MessageRateLimit": 120,
+      "MessageRateLimitWindowSeconds": 60,
+      "EnableTypedRouting": true,
+      "EnableAcknowledgements": true,
+      "MaxSubscriptionsPerConnection": 64,
+      "MaxTopicLength": 128,
+      "Redis": {
+        "Enabled": false,
+        "Configuration": "localhost:6379",
+        "Channel": "opx:websocket"
+      },
+      "AllowedOrigins": [
+        "https://app.server.com"
+      ]
+    }
+  }
+}
+```
+
+Typed handler example:
+
+```csharp
+public sealed record ArtistWatchRequest(int ArtistId);
+
+public sealed class ArtistWatchMessageHandler
+    : OpxWebSocketMessageHandler<ArtistWatchRequest>
+{
+    public override string Type => "artist.watch";
+
+    protected override ValueTask HandleAsync(
+        OpxWebSocketSession session,
+        ArtistWatchRequest? data,
+        OpxWebSocketMessage message,
+        CancellationToken cancellationToken)
+    {
+        return new ValueTask(session.SendMessageAsync(
+            "artist.watching",
+            new { artistId = data?.ArtistId },
+            correlationId: message.MessageId,
+            cancellationToken: cancellationToken));
+    }
+}
+```
+
+Protocol envelope:
+
+```json
+{
+  "type": "artist.watch",
+  "messageId": "8f018889bd1742f1a2f72fc680113eb1",
+  "correlationId": null,
+  "topic": "artists",
+  "requireAck": true,
+  "data": { "artistId": 1 }
+}
+```
+
+Reserved message types are `opx.subscribe`, `opx.unsubscribe`, `opx.subscribed`, `opx.unsubscribed`, `opx.ping`, `opx.pong`, `opx.ack`, and `opx.error`. When `requireAck` is true, the server returns `opx.ack` with the request `messageId` in `correlationId`.
+
+Handler example:
+
+```csharp
+using System.Text;
+using Opx.Api.Web.WebSockets;
+
+public sealed class NotificationWebSocketHandler : OpxWebSocketHandler
+{
+    public override ValueTask OnConnectedAsync(
+        OpxWebSocketSession session,
+        CancellationToken cancellationToken)
+    {
+        return new ValueTask(session.SendJsonAsync(new
+        {
+            type = "connected",
+            sessionId = session.Id
+        }, cancellationToken));
+    }
+
+    public override ValueTask OnTextMessageAsync(
+        OpxWebSocketSession session,
+        ReadOnlyMemory<byte> utf8Message,
+        CancellationToken cancellationToken)
+    {
+        return new ValueTask(session.SendJsonAsync(new
+        {
+            type = "message",
+            value = Encoding.UTF8.GetString(utf8Message.Span)
+        }, cancellationToken));
+    }
+}
+```
+
+Broadcast from an application service:
+
+```csharp
+public sealed class NotificationService
+{
+    private readonly IOpxWebSocketConnectionManager _connections;
+
+    public NotificationService(IOpxWebSocketConnectionManager connections)
+    {
+        _connections = connections;
+    }
+
+    public Task NotifyArtistAsync(int artistId, CancellationToken cancellationToken)
+    {
+        return _connections.SendToTopicAsync(
+            $"artist:{artistId}",
+            "artist.updated",
+            new { artistId },
+            cancellationToken);
+    }
+}
+```
+
+The manager also provides `SendToSessionAsync`, `SendToUserAsync`, `SendToGroupAsync`, and `BroadcastMessageAsync`. One authenticated user ID can map to multiple active connections. User ID is resolved from the `NameIdentifier` claim, `sub` claim, or identity name.
+
+Browser request:
+
+```javascript
+const socket = new WebSocket("wss://api.server.com/ws/notifications");
+socket.onmessage = event => console.log(JSON.parse(event.data));
+socket.onopen = () => socket.send(JSON.stringify({
+  type: "opx.subscribe",
+  messageId: crypto.randomUUID(),
+  topic: "orders",
+  requireAck: true,
+  data: { topic: "orders" }
+}));
+```
+
+Browser clients use the normal authentication cookie when `RequireAuthorization` is enabled because the browser WebSocket API cannot set an `Authorization` header. A .NET client can send the same JWT used by the HTTP API:
+
+```csharp
+using var socket = new ClientWebSocket();
+socket.Options.SetRequestHeader("Authorization", $"Bearer {accessToken}");
+await socket.ConnectAsync(new Uri("wss://api.server.com/ws/notifications"), cancellationToken);
+```
+
+Enable Redis only for multi-server deployments. Local delivery remains active if Redis is unavailable, while `GET /opx/protection/health` reports active connections, users, topics, and backplane connectivity. `GET /opx/protection/metrics` includes accepted, closed, rejected, sent/received message, and byte counters.
+
+The JWT bearer header is validated during the HTTP upgrade when `RequireAuthorization` is enabled. Oversized messages and per-connection rate-limit violations are closed using standard WebSocket close codes and queued into the existing security issue log without recording message bodies. Configure `AllowedOrigins` in production; an empty list accepts every origin. A handler is created in a new DI scope for each connection, and all active sessions are closed during application shutdown. Message memory is pooled and valid only during the handler callback, so copy it when it must be retained.
 
 ## Benchmark Smoke Test
 
@@ -487,11 +719,13 @@ EndpointLogWriter 5000 file logs: Passed, 201 ms
 RateLimiting 500 concurrent: Passed, 156 ms
 RateLimiting policy-skipped 5000 concurrent: Passed, 33 ms
 SecurityIssueLogWriter 5000 file logs: Passed, 138 ms
+Client IP resolver 5000 trusted requests: Passed, 6 ms
 SuspiciousTrafficGuard clean 500 concurrent: Passed, 58 ms
 SuspiciousTrafficGuard clean 5000 concurrent: Passed, 39 ms
 SuspiciousTrafficGuard default wrapped-fast blocked 500 concurrent: Passed, 599 ms
 SuspiciousTrafficGuard minimal sampled blocked 500 concurrent: Passed, 105 ms
 SuspiciousTrafficGuard wrapped-fast sampled blocked 500 concurrent: Passed, 75 ms
+WebSocket 500 sequential text round trips: Passed, 94 ms
 ```
 
 These numbers are local smoke-test results, not a guaranteed benchmark for every machine or deployment.
