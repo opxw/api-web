@@ -96,6 +96,7 @@ app.UseOpxApiProtectionFast();
 Default behavior:
 
 - security headers are enabled by default
+- execution time response header is enabled by default for backward compatibility; set `OpxApiProtection:ResponseHeaders:ExposeExecutionTime` to `false` in production
 - rate limiting is disabled until `OpxApiProtection:RateLimiting:Enabled` is `true`
 - suspicious traffic guard is disabled until `OpxApiProtection:SuspiciousTraffic:Enabled` is `true`
 - authorization guard is disabled until `OpxApiProtection:AuthorizationGuard:Enabled` is `true`
@@ -110,6 +111,12 @@ Configuration:
       "Enabled": true,
       "ReferrerPolicy": "no-referrer",
       "FrameOptions": "DENY"
+    },
+    "ResponseHeaders": {
+      "ExposeExecutionTime": false
+    },
+    "ErrorResponse": {
+      "HttpStatusMode": "Always200"
     },
     "RateLimiting": {
       "Enabled": true,
@@ -256,6 +263,38 @@ Configuration:
     ],
     "FailOnConflict": true
   }
+}
+```
+
+Error response mode:
+
+- `Always200` keeps HTTP `200` and writes the logical error status to body `statusCode`; this is the default application contract.
+- `Original` uses the logical error status as the HTTP status.
+- invalid values fail options validation during startup.
+
+Applications that only need the shared response writer can register it without the full OPX controller/middleware stack:
+
+```csharp
+builder.Services.AddOpxApiResponseWriter(builder.Configuration);
+```
+
+```csharp
+await OpxApiResponseWriter.WriteErrorAsync(
+    HttpContext,
+    StatusCodes.Status401Unauthorized,
+    "Unauthorized",
+    HttpContext.RequestAborted);
+```
+
+Output in `Always200` mode:
+
+```json
+{
+  "result": false,
+  "data": {
+    "message": "Unauthorized"
+  },
+  "statusCode": "401"
 }
 ```
 

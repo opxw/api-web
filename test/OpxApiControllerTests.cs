@@ -9,16 +9,22 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using Opx.Api.Infrastructure.Service;
 using Opx.Api.Web.Common;
 using Opx.Api.Web.Handlers;
+using Opx.Api.Web.Options;
 
 namespace Opx.Api.Web.Tests;
 
 [TestFixture]
 public class OpxApiControllerTests
 {
+	private static readonly IServiceProvider DefaultServices = new ServiceCollection().BuildServiceProvider();
+
 	[Test]
 	public async Task OpxApiExceptionHandler_WithException_WritesInternalServerErrorResponse()
 	{
@@ -211,6 +217,56 @@ public class OpxApiControllerTests
 	}
 
 	[Test]
+	public async Task OkAsync_WhenExecutionTimeIsHidden_DoesNotWriteHeader()
+	{
+		var configuration = new ConfigurationBuilder()
+			.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:ResponseHeaders:ExposeExecutionTime"] = "false"
+			})
+			.Build();
+		using var services = new ServiceCollection()
+			.AddOptions<OpxApiResponseHeaderOptions>()
+			.Bind(configuration.GetSection("OpxApiProtection:ResponseHeaders"))
+			.Services
+			.BuildServiceProvider();
+		var controller = CreateController(services);
+
+		await controller.WriteOkAsync(new { Name = "opx" });
+
+		Assert.That(controller.HttpContext.Response.Headers.ContainsKey("Execution-Time"), Is.False);
+	}
+
+	[Test]
+	public async Task OkAsync_WhenExecutionTimeSettingReloads_AppliesLatestValue()
+	{
+		var configuration = new ConfigurationBuilder()
+			.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:ResponseHeaders:ExposeExecutionTime"] = "true"
+			})
+			.Build();
+		using var services = new ServiceCollection()
+			.AddOptions<OpxApiResponseHeaderOptions>()
+			.Bind(configuration.GetSection("OpxApiProtection:ResponseHeaders"))
+			.Services
+			.BuildServiceProvider();
+		var visibleController = CreateController(services);
+
+		await visibleController.WriteOkAsync(new { Name = "visible" });
+		configuration["OpxApiProtection:ResponseHeaders:ExposeExecutionTime"] = "false";
+		((IConfigurationRoot)configuration).Reload();
+		var hiddenController = CreateController(services);
+		await hiddenController.WriteOkAsync(new { Name = "hidden" });
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(visibleController.HttpContext.Response.Headers.ContainsKey("Execution-Time"), Is.True);
+			Assert.That(hiddenController.HttpContext.Response.Headers.ContainsKey("Execution-Time"), Is.False);
+		});
+	}
+
+	[Test]
 	public async Task OkOrFailAsync_WithSuccessfulAppResult_AssignsServiceDataToApiResultData()
 	{
 		var controller = CreateController();
@@ -316,9 +372,65 @@ public class OpxApiControllerTests
 		});
 	}
 
-	private static TestOpxApiController CreateController()
+	[TestCase("Always200", StatusCodes.Status200OK)]
+	[TestCase("Original", StatusCodes.Status401Unauthorized)]
+	public async Task OpxApiResponseWriter_UsesConfiguredHttpStatusMode(
+		string mode,
+		int expectedHttpStatus)
+	{
+		var configuration = new ConfigurationBuilder()
+			.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:ErrorResponse:HttpStatusMode"] = mode,
+				["OpxApiProtection:ResponseHeaders:ExposeExecutionTime"] = "false"
+			})
+			.Build();
+		using var services = new ServiceCollection()
+			.AddOpxApiResponseWriter(configuration)
+			.BuildServiceProvider();
+		var context = new DefaultHttpContext
+		{
+			RequestServices = services
+		};
+		context.Response.Body = new MemoryStream();
+
+		await OpxApiResponseWriter.WriteErrorAsync(
+			context,
+			StatusCodes.Status401Unauthorized,
+			"custom unauthorized");
+		var response = await ReadResponseAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(context.Response.StatusCode, Is.EqualTo(expectedHttpStatus));
+			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
+			Assert.That(response.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("custom unauthorized"));
+			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo("401"));
+			Assert.That(OpxApiResponseWriter.GetLogicalStatusCode(context), Is.EqualTo(StatusCodes.Status401Unauthorized));
+		});
+	}
+
+	[Test]
+	public void AddOpxApiResponseWriter_WhenHttpStatusModeIsInvalid_RejectsOptions()
+	{
+		var configuration = new ConfigurationBuilder()
+			.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["OpxApiProtection:ErrorResponse:HttpStatusMode"] = "99"
+			})
+			.Build();
+		using var services = new ServiceCollection()
+			.AddOpxApiResponseWriter(configuration)
+			.BuildServiceProvider();
+
+		Assert.Throws<OptionsValidationException>(() =>
+			services.GetRequiredService<IOptions<OpxApiErrorResponseOptions>>().Value.ToString());
+	}
+
+	private static TestOpxApiController CreateController(IServiceProvider? services = null)
 	{
 		var httpContext = new DefaultHttpContext();
+		httpContext.RequestServices = services ?? DefaultServices;
 		httpContext.Items["StartTime"] = DateTime.UtcNow;
 		httpContext.Response.Body = new MemoryStream();
 

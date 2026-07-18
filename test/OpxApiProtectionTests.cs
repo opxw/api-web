@@ -14,6 +14,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NUnit.Framework;
+using Opx.Api.Web.Common;
 using Opx.Api.Web.Controllers;
 using Opx.Api.Web.Logs;
 using Opx.Api.Web.Middlewares;
@@ -26,6 +27,41 @@ namespace Opx.Api.Web.Tests;
 [TestFixture]
 public class OpxApiProtectionTests
 {
+	[Test]
+	public async Task StatusCodeHandler_WhenResponseHasStarted_DoesNotRewriteExistingBody()
+	{
+		var builder = WebApplication.CreateBuilder();
+		builder.WebHost.UseTestServer();
+		var app = builder.Build();
+		app.Use(async (context, next) =>
+		{
+			await next();
+			await ((WebApplication)null!).HandleUncatchedStatusCodeAsync(context);
+		});
+		app.Run(async context =>
+		{
+			context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+			context.Response.ContentType = "application/json";
+			await context.Response.WriteAsync("{\"custom\":true}");
+		});
+
+		await app.StartAsync();
+		try
+		{
+			using var response = await app.GetTestClient().GetAsync("/");
+
+			Assert.Multiple(() =>
+			{
+				Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized));
+				Assert.That(response.Content.ReadAsStringAsync().Result, Is.EqualTo("{\"custom\":true}"));
+			});
+		}
+		finally
+		{
+			await app.DisposeAsync();
+		}
+	}
+
 	[Test]
 	public async Task SecurityHeaders_AddsExpectedHeaders()
 	{
@@ -48,6 +84,37 @@ public class OpxApiProtectionTests
 			Assert.That(context.Response.Headers.ContainsKey("Server"), Is.False);
 			Assert.That(context.Response.Headers.ContainsKey("X-Powered-By"), Is.False);
 		});
+	}
+
+	[Test]
+	public async Task ResponseHeaders_WhenExecutionTimeIsHidden_RemovesHeaderAddedByEndpoint()
+	{
+		var builder = WebApplication.CreateBuilder();
+		builder.WebHost.UseTestServer();
+		builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+		{
+			["OpxApiProtection:ResponseHeaders:ExposeExecutionTime"] = "false"
+		});
+		builder.Services.AddOpxApiWeb(builder.Configuration);
+		var app = builder.Build();
+		app.UseOpxSecurityHeaders();
+		app.Run(context =>
+		{
+			context.Response.Headers["Execution-Time"] = "1.234";
+			return context.Response.WriteAsync("ok");
+		});
+
+		await app.StartAsync();
+		try
+		{
+			using var response = await app.GetTestClient().GetAsync("/");
+
+			Assert.That(response.Headers.Contains("Execution-Time"), Is.False);
+		}
+		finally
+		{
+			await app.DisposeAsync();
+		}
 	}
 
 	[Test]

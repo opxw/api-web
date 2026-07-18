@@ -37,6 +37,9 @@ namespace Opx.Api.Web
 		public static IServiceCollection AddOpxApiWeb(this IServiceCollection services, IConfiguration configuration, Action<OpxWebApiOptions>? configure = null)
 		{
 			services.AddSingleton(configuration);
+			services.AddOpxApiResponseWriter(configuration);
+			services.AddOptions<OpxApiResponseHeaderOptions>()
+				.Bind(configuration.GetSection("OpxApiProtection:ResponseHeaders"));
 			services.AddOpxWebFramework(configuration, options => ConfigureWebFrameworkFromApiProtection(configuration, options));
 			return services.UseOpxWebApi(configure);
 		}
@@ -47,6 +50,8 @@ namespace Opx.Api.Web
 			configure?.Invoke(options);
 
 			services.AddOpxWebFramework();
+			services.AddOptions<OpxApiErrorResponseOptions>();
+			services.AddOptions<OpxApiResponseHeaderOptions>();
 			services.AddAuthorization();
 
 			services.Configure<ApiBehaviorOptions>(o =>
@@ -71,6 +76,19 @@ namespace Opx.Api.Web
 				services.AddHostedService<OpxApiDocsGeneratorHostedService>();
 			}
 
+			return services;
+		}
+
+		public static IServiceCollection AddOpxApiResponseWriter(
+			this IServiceCollection services,
+			IConfiguration configuration)
+		{
+			services.AddOptions<OpxApiErrorResponseOptions>()
+				.Bind(configuration.GetSection("OpxApiProtection:ErrorResponse"))
+				.Validate(
+					options => Enum.IsDefined(options.HttpStatusMode),
+					"OpxApiProtection:ErrorResponse:HttpStatusMode must be Always200 or Original.")
+				.ValidateOnStart();
 			return services;
 		}
 
@@ -406,6 +424,11 @@ namespace Opx.Api.Web
 		private static void ConfigureWebFrameworkFromApiProtection(IConfiguration configuration, OpxWebFrameworkOptions options)
 		{
 			options.ResponseHeaders.Enabled = configuration.GetValue("OpxApiProtection:SecurityHeaders:Enabled", options.ResponseHeaders.Enabled);
+			if (!configuration.GetValue("OpxApiProtection:ResponseHeaders:ExposeExecutionTime", true)
+				&& !options.ResponseHeaders.Remove.Contains("Execution-Time", StringComparer.OrdinalIgnoreCase))
+			{
+				options.ResponseHeaders.Remove = [.. options.ResponseHeaders.Remove, "Execution-Time"];
+			}
 			options.ResponseHeaders.Set["Referrer-Policy"] = configuration.GetValue("OpxApiProtection:SecurityHeaders:ReferrerPolicy", options.ResponseHeaders.Set["Referrer-Policy"]);
 			options.ResponseHeaders.Set["X-Frame-Options"] = configuration.GetValue("OpxApiProtection:SecurityHeaders:FrameOptions", options.ResponseHeaders.Set["X-Frame-Options"]);
 

@@ -7,6 +7,9 @@ namespace Opx.Api.Web.Common
 	{
 		public static async Task HandleUncatchedStatusCodeAsync(this WebApplication app, HttpContext context, string sender = "")
 		{
+			if (context.Response.HasStarted)
+				return;
+
 			var statusCode = context.Response.StatusCode;
 
 			// Successful and redirect/cache responses (including 204 and 304) must retain
