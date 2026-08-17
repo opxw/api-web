@@ -423,7 +423,14 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 
 	private static string ResolveCorrelationId(HttpContext context)
 	{
-		var header = context.Request.Headers["X-Correlation-ID"].FirstOrDefault();
+		var header = context.Items.TryGetValue(OpxRequestIdMiddleware.ItemName, out var requestId)
+			? requestId?.ToString()
+			: context.Request.Headers["X-Request-ID"].FirstOrDefault();
+		if (string.IsNullOrWhiteSpace(header))
+		{
+			header = context.Request.Headers["X-Correlation-ID"].FirstOrDefault();
+		}
+
 		return string.IsNullOrWhiteSpace(header) ? context.TraceIdentifier : header.Trim();
 	}
 
@@ -456,19 +463,19 @@ public sealed class OpxSuspiciousTrafficGuardMiddleware
 	private static async Task WriteMinimalBlockedResponseAsync(HttpContext context, SuspiciousTrafficSettings settings)
 	{
 		var response = settings.MinimalBlockedResponseBytes;
-		await WriteCachedBlockedResponseAsync(context, response);
+		await WriteCachedBlockedResponseAsync(context, response, settings.StatusCode);
 	}
 
 	private static async Task WriteWrappedFastBlockedResponseAsync(HttpContext context, SuspiciousTrafficSettings settings)
 	{
 		var response = settings.WrappedFastBlockedResponseBytes;
-		await WriteCachedBlockedResponseAsync(context, response);
+		await WriteCachedBlockedResponseAsync(context, response, settings.StatusCode);
 	}
 
-	private static async Task WriteCachedBlockedResponseAsync(HttpContext context, byte[] response)
+	private static async Task WriteCachedBlockedResponseAsync(HttpContext context, byte[] response, int logicalStatusCode)
 	{
 		context.Response.ContentType = "application/json";
-		context.Response.StatusCode = StatusCodes.Status200OK;
+		context.Response.StatusCode = OpxApiResponseWriter.ResolveHttpStatusCode(context, logicalStatusCode);
 		context.Response.ContentLength = response.Length;
 		await context.Response.Body.WriteAsync(response);
 		await context.Response.CompleteAsync();

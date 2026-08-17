@@ -49,9 +49,9 @@ public static class OpxApiResponseWriter
 		var options = context.RequestServices?
 			.GetService<IOptionsMonitor<OpxApiErrorResponseOptions>>()?
 			.CurrentValue;
-		return options?.HttpStatusMode == OpxApiHttpStatusMode.Original
-			? logicalStatusCode
-			: StatusCodes.Status200OK;
+		return options?.HttpStatusMode == OpxApiHttpStatusMode.Always200
+			? StatusCodes.Status200OK
+			: logicalStatusCode;
 	}
 
 	private sealed record OpxApiErrorMessage(

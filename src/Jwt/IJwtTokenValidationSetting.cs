@@ -8,5 +8,8 @@ namespace Opx.Api.Web.Jwt
 		string Audience { get; set; }
 		int ExpirationSeconds { get; set; }
 		string Algorithm { get; set; }
+		bool RequireExpirationTime { get; set; }
+		int ClockSkewSeconds { get; set; }
+		bool RequireHttpsMetadata { get; set; }
 	}
 }

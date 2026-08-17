@@ -212,6 +212,11 @@ namespace Opx.Api.Web
 			return UseOnce<OpxEndpointLogMiddleware>(app, ApiMiddlewareMarkerPrefix + "EndpointLog");
 		}
 
+		public static IApplicationBuilder UseOpxRequestId(this IApplicationBuilder app)
+		{
+			return UseOnce<OpxRequestIdMiddleware>(app, ApiMiddlewareMarkerPrefix + "RequestId");
+		}
+
 		public static IApplicationBuilder UseOpxSecurityHeaders(this IApplicationBuilder app)
 		{
 			return UseFrameworkMiddlewareOnce(
@@ -246,6 +251,7 @@ namespace Opx.Api.Web
 		public static IApplicationBuilder UseOpxApiProtection(this IApplicationBuilder app)
 		{
 			EnsureProtectionMode(app, "Normal");
+			app.UseOpxRequestId();
 			app.UseOpxSecurityHeaders();
 			app.UseOpxRateLimiting();
 			app.UseOpxSuspiciousTrafficGuard();
@@ -258,6 +264,7 @@ namespace Opx.Api.Web
 		public static IApplicationBuilder UseOpxApiProtectionFast(this IApplicationBuilder app)
 		{
 			EnsureProtectionMode(app, "Fast");
+			app.UseOpxRequestId();
 			app.UseOpxSecurityHeaders();
 
 			var fastMarker = ApiMiddlewareMarkerPrefix + "ProtectionFast";
@@ -381,7 +388,10 @@ namespace Opx.Api.Web
 		{
 			services.AddSingleton<IJwtTokenValidationSetting, JwtTokenValidationSetting>(_ => validationSetting);
 
-			var signingKey = new SymmetricSecurityKey(Encoding.ASCII.GetBytes(validationSetting.SecretKey));
+			var algorithm = OpxJwtSecurity.ResolveHmacAlgorithm(validationSetting.Algorithm);
+			var signingKeyBytes = Encoding.UTF8.GetBytes(validationSetting.SecretKey);
+			OpxJwtSecurity.ValidateSecretLength(signingKeyBytes.Length, algorithm);
+			var signingKey = new SymmetricSecurityKey(signingKeyBytes);
 			var validationParameters = new TokenValidationParameters()
 			{
 				ValidateIssuerSigningKey = true,
@@ -391,8 +401,9 @@ namespace Opx.Api.Web
 				ValidateAudience = string.IsNullOrWhiteSpace(validationSetting.Audience) ? false : true,
 				ValidAudience = validationSetting.Audience,
 				ValidateLifetime = true,
-				ClockSkew = TimeSpan.Zero,
-				RequireExpirationTime = false
+				ClockSkew = TimeSpan.FromSeconds(Math.Max(0, validationSetting.ClockSkewSeconds)),
+				RequireExpirationTime = validationSetting.RequireExpirationTime,
+				ValidAlgorithms = [algorithm]
 			};
 
 			services.AddAuthentication(o =>
@@ -403,7 +414,7 @@ namespace Opx.Api.Web
 				o.DefaultForbidScheme = JwtBearerDefaults.AuthenticationScheme;
 			}).AddJwtBearer(o =>
 			{
-				o.RequireHttpsMetadata = false;
+				o.RequireHttpsMetadata = validationSetting.RequireHttpsMetadata;
 				o.TokenValidationParameters = validationParameters;
 				o.Events = new JwtBearerEvents
 				{
@@ -418,6 +429,16 @@ namespace Opx.Api.Web
 				};
 			});
 
+			return services;
+		}
+
+		public static IServiceCollection AddOpxSharedJwtTokenIssuer(
+			this IServiceCollection services,
+			JwtTokenValidationSetting validationSetting)
+		{
+			ArgumentNullException.ThrowIfNull(validationSetting);
+			services.AddSingleton<IJwtTokenValidationSetting>(_ => validationSetting);
+			services.TryAddSingleton<IOpxSharedJwtTokenService, OpxSharedJwtTokenService>();
 			return services;
 		}
 

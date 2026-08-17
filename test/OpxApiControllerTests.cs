@@ -57,7 +57,7 @@ public class OpxApiControllerTests
 		Assert.Multiple(() =>
 		{
 			Assert.That(exceptionContext.ExceptionHandled, Is.True);
-			Assert.That(httpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(httpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status500InternalServerError));
 			Assert.That(result.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(result.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.InternalServerError).ToString()));
 			Assert.That(data.GetProperty("message").GetString(), Is.EqualTo("Something failed"));
@@ -82,7 +82,7 @@ public class OpxApiControllerTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(httpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(httpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status401Unauthorized));
 			Assert.That(result.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(result.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.Unauthorized).ToString()));
 			Assert.That(data.GetProperty("message").GetString(), Is.EqualTo("Unauthorized"));
@@ -107,7 +107,7 @@ public class OpxApiControllerTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(httpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(httpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status404NotFound));
 			Assert.That(result.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(result.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.NotFound).ToString()));
 			Assert.That(data.GetProperty("message").GetString(), Is.EqualTo("Not found"));
@@ -309,7 +309,7 @@ public class OpxApiControllerTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(controller.HttpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(controller.HttpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 			Assert.That(result.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(result.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 			Assert.That(data.GetProperty("message").GetString(), Is.EqualTo("User not found"));
@@ -333,7 +333,7 @@ public class OpxApiControllerTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(controller.HttpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(controller.HttpContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status500InternalServerError));
 			Assert.That(result.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(result.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.InternalServerError).ToString()));
 			Assert.That(result.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("Database timeout"));

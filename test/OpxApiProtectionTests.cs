@@ -28,6 +28,45 @@ namespace Opx.Api.Web.Tests;
 public class OpxApiProtectionTests
 {
 	[Test]
+	public async Task RequestIdMiddleware_WithValidHeader_PropagatesRequestId()
+	{
+		var context = CreateContext();
+		context.Request.Headers[OpxRequestIdMiddleware.HeaderName] = "client-request-71";
+		string? observedTraceIdentifier = null;
+		var middleware = new OpxRequestIdMiddleware(nextContext =>
+		{
+			observedTraceIdentifier = nextContext.TraceIdentifier;
+			return Task.CompletedTask;
+		});
+
+		await middleware.InvokeAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(observedTraceIdentifier, Is.EqualTo("client-request-71"));
+			Assert.That(context.Items[OpxRequestIdMiddleware.ItemName], Is.EqualTo("client-request-71"));
+			Assert.That(context.Response.Headers[OpxRequestIdMiddleware.HeaderName].ToString(), Is.EqualTo("client-request-71"));
+		});
+	}
+
+	[Test]
+	public async Task RequestIdMiddleware_WithInvalidHeader_UsesServerTraceIdentifier()
+	{
+		var context = CreateContext();
+		context.TraceIdentifier = "server-request-1";
+		context.Request.Headers[OpxRequestIdMiddleware.HeaderName] = new string('x', 129);
+		var middleware = new OpxRequestIdMiddleware(_ => Task.CompletedTask);
+
+		await middleware.InvokeAsync(context);
+
+		Assert.Multiple(() =>
+		{
+			Assert.That(context.TraceIdentifier, Is.EqualTo("server-request-1"));
+			Assert.That(context.Response.Headers[OpxRequestIdMiddleware.HeaderName].ToString(), Is.EqualTo("server-request-1"));
+		});
+	}
+
+	[Test]
 	public async Task StatusCodeHandler_WhenResponseHasStarted_DoesNotRewriteExistingBody()
 	{
 		var builder = WebApplication.CreateBuilder();
@@ -206,7 +245,7 @@ public class OpxApiProtectionTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 			Assert.That(response.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("Suspicious traffic detected"));
@@ -416,7 +455,7 @@ public class OpxApiProtectionTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 			Assert.That(response.GetProperty("data").GetString(), Is.EqualTo("Suspicious traffic detected"));
@@ -444,7 +483,7 @@ public class OpxApiProtectionTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 			Assert.That(response.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("Suspicious traffic detected"));
@@ -1281,7 +1320,7 @@ public class OpxApiProtectionTests
 		Assert.Multiple(() =>
 		{
 			Assert.That(firstContext.Response.Headers["RateLimit-Remaining"].ToString(), Is.EqualTo("0"));
-			Assert.That(secondContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+			Assert.That(secondContext.Response.StatusCode, Is.EqualTo(StatusCodes.Status429TooManyRequests));
 			Assert.That(secondContext.Response.Headers["Retry-After"].ToString(), Is.Not.Empty);
 			Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.TooManyRequests).ToString()));
@@ -1483,7 +1522,7 @@ public class OpxApiProtectionTests
 
 			Assert.Multiple(() =>
 			{
-				Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+				Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 				Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 				Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 				Assert.That(context.Items["OpxSuspiciousReason"], Is.EqualTo(".env"));
@@ -1530,7 +1569,7 @@ public class OpxApiProtectionTests
 
 				Assert.Multiple(() =>
 				{
-					Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+					Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 					Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 					Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 					Assert.That(response.GetProperty("data").GetString(), Is.EqualTo("Suspicious traffic detected"));
@@ -1582,7 +1621,7 @@ public class OpxApiProtectionTests
 
 				Assert.Multiple(() =>
 				{
-					Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status200OK));
+					Assert.That(context.Response.StatusCode, Is.EqualTo(StatusCodes.Status400BadRequest));
 					Assert.That(response.GetProperty("result").GetBoolean(), Is.False);
 					Assert.That(response.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.BadRequest).ToString()));
 					Assert.That(response.GetProperty("data").GetProperty("message").GetString(), Is.EqualTo("Suspicious traffic detected"));

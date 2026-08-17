@@ -9,5 +9,5 @@ public enum OpxApiHttpStatusMode
 
 public sealed class OpxApiErrorResponseOptions
 {
-	public OpxApiHttpStatusMode HttpStatusMode { get; set; } = OpxApiHttpStatusMode.Always200;
+	public OpxApiHttpStatusMode HttpStatusMode { get; set; } = OpxApiHttpStatusMode.Original;
 }

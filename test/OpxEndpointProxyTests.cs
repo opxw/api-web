@@ -93,7 +93,7 @@ public class OpxEndpointProxyTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(blocked.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+			Assert.That(blocked.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized));
 			Assert.That(blockedBody.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(blockedBody.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.Unauthorized).ToString()));
 			Assert.That(allowed.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -119,7 +119,7 @@ public class OpxEndpointProxyTests
 
 		Assert.Multiple(() =>
 		{
-			Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+			Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized));
 			Assert.That(body.GetProperty("result").GetBoolean(), Is.False);
 			Assert.That(body.GetProperty("statusCode").GetString(), Is.EqualTo(((int)HttpStatusCode.Unauthorized).ToString()));
 			Assert.That(body.GetProperty("data").GetProperty("id").GetString(), Is.EqualTo("EndpointProxy"));

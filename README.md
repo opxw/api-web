@@ -116,7 +116,7 @@ Configuration:
       "ExposeExecutionTime": false
     },
     "ErrorResponse": {
-      "HttpStatusMode": "Always200"
+      "HttpStatusMode": "Original"
     },
     "RateLimiting": {
       "Enabled": true,
@@ -268,8 +268,8 @@ Configuration:
 
 Error response mode:
 
-- `Always200` keeps HTTP `200` and writes the logical error status to body `statusCode`; this is the default application contract.
-- `Original` uses the logical error status as the HTTP status.
+- `Original` uses the logical error status as the HTTP status and keeps the OPX wrapper body; this is the default.
+- `Always200` keeps HTTP `200` and writes the logical error status to body `statusCode` for legacy clients.
 - invalid values fail options validation during startup.
 
 Applications that only need the shared response writer can register it without the full OPX controller/middleware stack:
@@ -286,7 +286,7 @@ await OpxApiResponseWriter.WriteErrorAsync(
     HttpContext.RequestAborted);
 ```
 
-Output in `Always200` mode:
+Error body in both modes:
 
 ```json
 {
@@ -1295,17 +1295,26 @@ Clients should decode `data.rawData` from base64 according to `data.contentType`
 
 ## JWT Bearer Helper
 
-Register JWT bearer authentication:
+Use one claim schema and issuer across applications, but issue a different token
+for every device session. Do not copy one literal access token between desktop,
+mobile, and web clients.
+
+Register JWT bearer validation on every API:
 
 ```csharp
-builder.Services.UseOpxJwtBearerTokenAuth(new JwtTokenValidationSetting
+var jwtSettings = new JwtTokenValidationSetting
 {
-    SecretKey = "your-secret-key",
-    Issuer = "opx",
+    SecretKey = "replace-with-at-least-32-random-bytes",
+    Issuer = "opx-auth",
     Audience = "opx-api",
-    ExpirationSeconds = 3600,
-    Algorithm = SecurityAlgorithms.HmacSha256
-});
+    ExpirationSeconds = 900,
+    Algorithm = SecurityAlgorithms.HmacSha256,
+    RequireExpirationTime = true,
+    ClockSkewSeconds = 30,
+    RequireHttpsMetadata = true
+};
+
+builder.Services.UseOpxJwtBearerTokenAuth(jwtSettings);
 ```
 
 Then enable authentication middleware:
@@ -1314,6 +1323,87 @@ Then enable authentication middleware:
 app.UseAuthentication();
 app.UseAuthorization();
 ```
+
+Register the issuer only in the authentication/login service:
+
+```csharp
+builder.Services.AddOpxSharedJwtTokenIssuer(jwtSettings);
+```
+
+Create a token after credentials and device registration have been validated:
+
+```csharp
+var loginIp = OpxClientIpResolver.Resolve(HttpContext, configuration).Text;
+var token = tokenIssuer.CreateToken(new OpxSharedJwtTokenRequest
+{
+    Subject = user.Id,
+    Name = user.UserName,
+    SessionId = deviceSession.Id,
+    Roles = user.Roles,
+    Scopes = user.Scopes,
+    LoginIpAddress = loginIp,
+    Device = new OpxSharedJwtDeviceMetadata
+    {
+        DeviceId = login.Device.DeviceId,
+        DeviceType = login.Device.DeviceType,
+        DeviceName = login.Device.DeviceName,
+        Platform = login.Device.Platform,
+        ClientApplication = login.Device.ClientApplication,
+        ClientVersion = login.Device.ClientVersion
+    },
+    Security = new OpxSharedJwtSecurityContext
+    {
+        AuthenticationMethods = [ "pwd", "otp" ],
+        AuthenticationContext = "urn:opx:loa:2",
+        AuthenticatedAt = DateTimeOffset.UtcNow
+    }
+});
+```
+
+Read the signed metadata and current request context in any API:
+
+```csharp
+var context = HttpContext.GetOpxJwtRequestContext();
+
+context.Subject;
+context.SessionId;
+context.JwtId;
+context.DeviceId;
+context.DeviceType;
+context.DeviceName;
+context.ClientApplication;
+context.LoginIpAddress;
+context.CurrentIpAddress;
+context.LoginIpMatchesCurrent;
+context.RequestId;
+```
+
+Shared claims:
+
+| Claim | Purpose |
+| --- | --- |
+| `sub` | Stable user/service identity |
+| `sid` | Device session ID; preserve it when refreshing that session |
+| `jti` | Unique ID for each access token |
+| `role`, `scope` | Authorization data |
+| `amr`, `acr`, `auth_time` | Authentication method, assurance context, and authentication time |
+| `device_id`, `device_type`, `device_name` | Signed device-session audit metadata |
+| `platform`, `client_app`, `client_version` | Client compatibility and risk signals |
+| `login_ip` | Server-observed IP when the token was issued |
+
+`device_name` and client-supplied platform data remain audit/risk signals even
+after signing; signing proves the issuer accepted the value, not that hardware
+attestation occurred. Never use device name or IP as the only authorization
+requirement. Persist an opaque installation ID rather than a MAC address,
+hardware serial, or other sensitive identifier.
+
+`reqId` is not a JWT claim. `Opx.Api.Client` sends a new `X-Request-ID` for
+each logical operation and reuses it only for an automatic retry. The server
+returns it through `GetOpxJwtRequestContext()` for audit correlation.
+
+For a broad multi-service trust boundary, prefer an asymmetric signing
+architecture so resource APIs receive only a public verification key. With
+HMAC, every service that possesses the shared secret can also mint tokens.
 
 ## Example Endpoint Log
 
