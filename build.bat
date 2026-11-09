@@ -1,0 +1,1 @@
+powershell.exeoProfile -ExecutionPolicy Bypass -File "D:\Works\projects\git\opx.api\api-web\pack-release.ps1"

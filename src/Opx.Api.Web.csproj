@@ -13,9 +13,9 @@
     <Company>opx</Company>
     <Copyright>Copyright (c) 2026 - opx</Copyright>
     <IsPackable>true</IsPackable>
-    <Version>1.0.20</Version>
-    <AssemblyVersion>1.0.20</AssemblyVersion>
-    <FileVersion>1.0.20.20260727</FileVersion>
+    <Version>1.0.22</Version>
+    <AssemblyVersion>1.0.22</AssemblyVersion>
+    <FileVersion>1.0.22.20261109</FileVersion>
     <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
     <NoWarn>$(NoWarn);7035</NoWarn>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -28,14 +28,14 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.11" />
   </ItemGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.14" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="8.19.2" />
-    <PackageReference Include="Opx.Api.Infrastructure" Version="1.0.3" />
-    <PackageReference Include="Opx.Web.Framework" Version="1.0.3" />
-    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.19.2" />
-    <PackageReference Include="StackExchange.Redis" Version="3.0.17" />
+    <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="8.23.0" />
+    <PackageReference Include="Opx.Api.Infrastructure" Version="1.0.5" />
+    <PackageReference Include="Opx.Web.Framework" Version="1.0.4" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.23.0" />
+    <PackageReference Include="StackExchange.Redis" Version="3.4.31" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\README.md" Pack="true" PackagePath="\" />
