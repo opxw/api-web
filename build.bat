@@ -1,1 +1,5 @@
-powershell.exeoProfile -ExecutionPolicy Bypass -File "D:\Works\projects\git\opx.api\api-web\pack-release.ps1"
+@echo off
+setlocal
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0pack-release.ps1"
+exit /b %ERRORLEVEL%

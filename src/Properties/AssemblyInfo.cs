@@ -2,5 +2,5 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
-[assembly: AssemblyFileVersion("1.0.22.20261109")]
+[assembly: AssemblyFileVersion("1.0.23.20261109")]
 [assembly: InternalsVisibleTo("Opx.Api.Web.Tests")]
